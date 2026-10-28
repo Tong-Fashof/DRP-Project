@@ -1,0 +1,7 @@
+﻿<?xml version="1.0" encoding="utf-8" ?>
+<config>
+	<Server>192.168.2.117,9823</Server>
+	<Database>AxWebReport_UAT</Database>
+	<UserId>dev</UserId>
+	<Password>P@ssw0rd22</Password>
+</config>
