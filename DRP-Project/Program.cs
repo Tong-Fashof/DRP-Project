@@ -15,11 +15,12 @@ namespace DRP_Project
         static void Main(string[] args)
         {
             // โหมด Unit Test: ตรวจก่อนต่อฐานข้อมูล แล้วจบโปรแกรมทันที
-            // รัน Unit Test (ไม่ต่อฐานข้อมูล): --test-netdemand | --test-gate1 | --test-gate2 | --test-normality
+            // รัน Unit Test (ไม่ต่อฐานข้อมูล): --test-netdemand | --test-gate1 | --test-gate2 | --test-normality | --test-sigma
             if (args.Contains("--test-netdemand")) { NetDemandTests.RunUnitTests(); return; }
             if (args.Contains("--test-gate1")) { Gate1.RunUnitTests(); return; }
             if (args.Contains("--test-gate2")) { Gate2.RunUnitTests(); return; }
             if (args.Contains("--test-normality")) { NormalityTests.RunUnitTests(); return; }
+            if (args.Contains("--test-sigma")) { SigmaCappingTests.RunUnitTests(); return; }
 
             if (!TryParseArgs(args)) return;   // Argument ผิดรูปแบบ -> จบโปรแกรม
 
@@ -41,7 +42,11 @@ namespace DRP_Project
 
                 // ===== STEP 3: Normality Testing (PBI-05) =====
                 // เฉพาะ SKU ที่ยัง PENDING: แยกสาย Normal -> PBI-06 Sigma / Non-normal -> PBI-07 IQR
-                RunNormality(connection, candidates);
+                var (normal, nonNormal) = RunNormality(connection, candidates);   // nonNormal -> PBI-07 (ยังไม่พัฒนา)
+
+                // ===== STEP 4: Sigma Capping (PBI-06) =====
+                // เฉพาะสาย Normal: ตัดยอดส่วนเกินด้วย 2SIGMA / 3SIGMA แล้วส่งต่อ PBI-08
+                List<CleansedDemandSeries> cleansed = RunSigmaCapping(connection, normal);
             }
             catch (Exception ex)
             {
@@ -229,9 +234,9 @@ namespace DRP_Project
         // ======================================================
         // PBI-05: โหลดเกณฑ์ Normality 3 ตัวจาก -> ทดสอบเฉพาะ SKU ที่ PENDING
         // -> แยกสาย Normal (PBI-06 Sigma) / Non-normal (PBI-07 IQR) แล้วแสดงสรุป
-        // ผลลัพธ์ normal / nonNormal ยังเป็นแค่สรุป ต้องส่งต่อให้ PBI-06 และ PBI-07
+        // คืน (normal, nonNormal): normal ส่งต่อ PBI-06 แล้ว | nonNormal ต้องส่งต่อ PBI-07
         // ======================================================
-        static void RunNormality(SqlConnection connection, List<SkuCleansingCandidate> candidates)
+        static (List<SkuNormalityResult> Normal, List<SkuNormalityResult> NonNormal) RunNormality(SqlConnection connection, List<SkuCleansingCandidate> candidates)
         {
             decimal pValueThreshold = LoadLovDecimal(connection, "JB_PVALUE_THRESHOLD", NormalityEngine.DefaultPValueThreshold);
             decimal skewLimit = LoadLovDecimal(connection, "SKEW_NORMAL_LIMIT", NormalityEngine.DefaultSkewLimit);
@@ -262,6 +267,44 @@ namespace DRP_Project
                 int n = g.Count(r => r.IsNormal);
                 Console.WriteLine($"{g.Key,-12} รวม {g.Count(),7:N0} | Normal {n,7:N0} | Non-normal {g.Count() - n,7:N0}");
             }
+
+            return (normal, nonNormal);
+        }
+
+
+        // ======================================================
+        // PBI-06: โหลดเกณฑ์ CV_THRESHOLD / SIGMA_CAP_MULTIPLIER จาก M_LOV (ไม่พบ -> Default 0.5 / 3.0)
+        // -> ตัดยอดส่วนเกินสาย Normal ด้วย 2SIGMA (CV <= threshold) หรือ 3SIGMA (CV > threshold)
+        // ผลลัพธ์ List<CleansedDemandSeries> ต้องส่งต่อให้ PBI-08 (Cleansed Dataset Finalize Engine)
+        // ======================================================
+        static List<CleansedDemandSeries> RunSigmaCapping(SqlConnection connection, List<SkuNormalityResult> normal)
+        {
+            decimal cvThreshold = LoadLovDecimal(connection, "CV_THRESHOLD", SigmaCappingEngine.DefaultCvThreshold);
+            decimal sigmaCapMultiplier = LoadLovDecimal(connection, "SIGMA_CAP_MULTIPLIER", SigmaCappingEngine.DefaultSigmaCapMultiplier);
+
+            List<CleansedDemandSeries> cleansed = SigmaCappingEngine.CapAll(normal, cvThreshold, sigmaCapMultiplier);
+
+            int cappedSkus = cleansed.Count(c => c.QtyReduced24M.Any(q => q > 0m));
+            decimal totalReduced = cleansed.Sum(c => c.QtyReduced24M.Sum());
+
+            Console.WriteLine();
+            Console.WriteLine("--- Sigma Capping : ตัดยอดส่วนเกินสาย Normal ---");
+            Console.WriteLine($"เกณฑ์: CV_THRESHOLD = {cvThreshold}, SIGMA_CAP_MULTIPLIER = {sigmaCapMultiplier}");
+            Console.WriteLine($"Input (Normal)          : {normal.Count}");
+            Console.WriteLine($"2SIGMA                  : {cleansed.Count(c => c.CleansingMethod == SigmaCappingEngine.Method2Sigma)}");
+            Console.WriteLine($"3SIGMA                  : {cleansed.Count(c => c.CleansingMethod == SigmaCappingEngine.Method3Sigma)}");
+            Console.WriteLine($"SKU ที่มียอดถูกตัด        : {cappedSkus}");
+            Console.WriteLine($"ยอดรวมที่ถูกตัดทอน        : {totalReduced:N4}");
+
+            Console.WriteLine();
+            Console.WriteLine("--- Sigma Capping : แยกตามคลัง ---");
+            foreach (var g in cleansed.GroupBy(c => c.WarehouseCode).OrderBy(g => g.Key, StringComparer.Ordinal))
+            {
+                int capped = g.Count(c => c.QtyReduced24M.Any(q => q > 0m));
+                Console.WriteLine($"{g.Key,-12} รวม {g.Count(),7:N0} | 2SIGMA {g.Count(c => c.CleansingMethod == SigmaCappingEngine.Method2Sigma),7:N0} | 3SIGMA {g.Count(c => c.CleansingMethod == SigmaCappingEngine.Method3Sigma),7:N0} | ถูกตัด {capped,7:N0}");
+            }
+
+            return cleansed;
         }
     }
 }
