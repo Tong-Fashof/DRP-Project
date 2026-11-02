@@ -1,12 +1,13 @@
 # DRP_Project
 
-Console App ของระบบ DRP สำหรับเตรียมข้อมูลยอดขายก่อนตัดยอด Outlier รันต่อเนื่องในโปรแกรมเดียว 3 ขั้นตอน
+Console App ของระบบ DRP สำหรับเตรียมข้อมูลยอดขายและตัดยอด Outlier รันต่อเนื่องในโปรแกรมเดียว 4 ขั้นตอน
 
 1. **Net Demand Preprocessing** คำนวณยอดความต้องการขายที่แท้จริง (True Demand) รายเดือนของแต่ละ SKU ในแต่ละคลัง
 2. **Cleansing (Keep Gate 1 และ Gate 2)** คัดกรองสินค้าที่ไม่ควรถูกตัดยอดขาย
 3. **Normality Testing** ทดสอบการแจกแจงแบบปกติ เพื่อเลือกวิธีตัดยอดให้เหมาะกับสินค้าแต่ละตัว
+4. **Sigma Capping** ตัดยอดขายเดือนที่พุ่งสูงผิดปกติของสินค้าสายปกติ ด้วยเพดาน 2-Sigma หรือ 3-Sigma
 
-อ้างอิงงาน **PBI-02** Net Demand Preprocessing, **SCRUM-14 [PBI-03]** เกณฑ์คุ้มครอง Keep Gate 1, **SCRUM-15 [PBI-04]** เกณฑ์คุ้มครอง Keep Gate 2 และ **SCRUM-16 [PBI-05]** ทดสอบการแจกแจงแบบปกติทางสถิติ
+อ้างอิงงาน **PBI-02** Net Demand Preprocessing, **SCRUM-14 [PBI-03]** เกณฑ์คุ้มครอง Keep Gate 1, **SCRUM-15 [PBI-04]** เกณฑ์คุ้มครอง Keep Gate 2, **SCRUM-16 [PBI-05]** ทดสอบการแจกแจงแบบปกติทางสถิติ และ **SCRUM-17 [PBI-06]** ตัดยอดส่วนเกินสายปกติ 2-Sigma และ 3-Sigma Capping
 
 
 ## Net Demand Preprocessing (PBI-02)
@@ -92,6 +93,36 @@ SKU ที่ยัง **PENDING** หลังผ่านทั้ง Gate 1 �
 - ใช้ `double` เต็มความละเอียดตลอดการคำนวณ (ตามมาตรฐาน Excel) แล้วปัดเศษ 4 ตำแหน่งแบบ `MidpointRounding.AwayFromZero` ตอนเก็บลงผลลัพธ์เท่านั้น การตัดสิน Triple Gate เทียบด้วยค่าก่อนปัดเศษ
 - `AvgDemand` และ `Sd` ที่ส่งต่อให้ PBI-06/07 เป็นค่าของ 24 งวดเต็ม (FM-06, FM-07) ไม่ใช่ค่าของ Active Window
 
+## ตัดยอดส่วนเกินสายปกติ (Sigma Capping) (PBI-06)
+
+SKU ที่ผ่านการทดสอบ Normality (`IsNormal = true`) จะเข้าขั้นตอนนี้ เพื่อตัดยอดขายเดือนที่พุ่งสูงผิดปกติให้ลงมาอยู่ที่ระดับเพดานความปลอดภัย ไม่ให้ระบบเห็นว่าสินค้าขายดีเกินจริงแล้วสั่งซื้อมากเกินไปจนสินค้าล้นคลัง (Overstock) ขั้นตอนนี้ทำในหน่วยความจำทั้งหมด ไม่เขียนลงฐานข้อมูล
+
+**ทำอะไรบ้าง (ทีละ SKU)**
+
+1. คำนวณความผันผวนสัมพัทธ์ `CV = Sd / AvgDemand` ถ้า `AvgDemand = 0` ให้ `CV = 0` เพื่อไม่ให้หารด้วยศูนย์
+2. เลือกวิธีตัดยอดจากค่า CV
+
+| เงื่อนไข | วิธี | ตัวคูณ |
+|---|---|---|
+| `CV ≤ CV_THRESHOLD` (ค่าเริ่มต้น 0.5) | `2SIGMA` | 2.0 คงที่ |
+| `CV > CV_THRESHOLD` | `3SIGMA` | ค่าจาก `SIGMA_CAP_MULTIPLIER` (ค่าเริ่มต้น 3.0) |
+
+3. คำนวณเพดานบน `CapLimit = AvgDemand + ตัวคูณ × Sd` ปัดเศษ 4 ตำแหน่ง
+4. ตรวจยอดขายทั้ง 24 เดือน เดือนไหนสูงกว่า `CapLimit` จะถูกกดลงมาเท่ากับ `CapLimit` พอดี และเก็บส่วนที่ตัดออกไว้ใน `QtyReduced24M` ส่วนเดือนที่ไม่เกินเพดานคงยอดเดิม 100%
+
+**ตัวอย่าง** ยาพาราเซตามอลขายเฉลี่ย 100 กล่องต่อเดือน SD = 20 ได้ CV = 0.2 จึงใช้ 2SIGMA เพดานคือ 100 + 2 × 20 = 140 กล่อง เดือนที่ 5 ขายได้ 145 กล่อง จึงถูกตัดเหลือ 140 (ตัดออก 5 กล่อง) ส่วนอีก 23 เดือนไม่เกินเพดาน จึงคงยอดเดิม
+
+**รายละเอียดการคำนวณที่ควรรู้**
+
+- ตัดเฉพาะยอดที่สูงเกินเพดานด้านบน ไม่มีการเติมยอดเดือนที่ต่ำผิดปกติ
+- ยอดที่เท่ากับเพดานพอดีไม่นับว่าเป็นการตัดยอด (เทียบด้วย `>` ไม่ใช่ `>=`) และถ้า CV เท่ากับ `CV_THRESHOLD` พอดี จะใช้ 2SIGMA
+- ตัวคูณของ 2SIGMA คงที่ 2.0 ไม่อ่านจาก `M_LOV` ส่วน 3SIGMA ใช้ `SIGMA_CAP_MULTIPLIER` ถ้าไม่พบค่าใน `M_LOV` หรือแปลงค่าไม่ได้ จะใช้ค่าเริ่มต้น (`CV_THRESHOLD` = 0.5, `SIGMA_CAP_MULTIPLIER` = 3.0)
+- ทุกเดือนต้องเป็นไปตาม `ยอดสะอาด + ยอดที่ตัด = ยอดเดิม` โค้ดตรวจให้ทุกครั้ง ถ้าไม่ตรงจะหยุดพร้อมแจ้ง error
+- ใช้ `decimal` ตลอดการคำนวณ ปัดเศษเฉพาะ `CapLimit` ที่ 4 ตำแหน่งแบบ `MidpointRounding.AwayFromZero` ส่วนการเลือกวิธีเทียบด้วยค่า CV ก่อนปัดเศษ
+- `AvgDemand` และ `Sd` ที่ใช้คำนวณเพดานเป็นค่าของ 24 งวดเต็มที่รับต่อมาจากขั้น Normality ไม่ได้คำนวณใหม่
+- รับเฉพาะ SKU ที่ `IsNormal = true` ถ้าส่ง SKU สาย Non-normal เข้ามา หรือข้อมูลไม่ครบ 24 งวด จะแจ้ง error
+- ยอดขายเดิม 24 งวดถูกคัดลอกเก็บไว้ใน `OriginalDemand24M` จึงไม่กระทบอาเรย์ต้นทาง
+
 ## สูตรที่ใช้
 
 | สูตร | ค่าที่คำนวณ | วิธีคิด |
@@ -108,6 +139,8 @@ SKU ที่ยัง **PENDING** หลังผ่านทั้ง Gate 1 �
 | FM-10 | Skewness | ความเบ้ตัวอย่างบน Active Window เทียบเท่า `SKEW()` ใน Excel (`n / ((n-1)(n-2)) × Σz³`) |
 | FM-11 | Kurtosis | ความโด่งส่วนเกินตัวอย่างบน Active Window เทียบเท่า `KURT()` ใน Excel |
 | FM-12 | JbScore, JbPValue | คะแนน Jarque-Bera ปรับแก้ขนาดตัวอย่างตามสูตรเซลล์ AI2 ของ Template V1 และค่า `JbPValue = exp(-JbScore / 2)` |
+| FM-13 | CV | `SD / AvgDemand` (ถ้า AvgDemand = 0 ให้ CV = 0) ใช้เลือกวิธี 2SIGMA หรือ 3SIGMA |
+| FM-14 | CapLimit, CleansedDemand, QtyReduced | `CapLimit = AvgDemand + ตัวคูณ × SD` (ตัวคูณ 2.0 หรือ `SIGMA_CAP_MULTIPLIER`) เดือนที่เกินเพดานถูกกดเหลือเท่า CapLimit และส่วนที่ตัดเก็บใน QtyReduced |
 
 FM-08 และ FM-09 ใช้สูตรสหสัมพันธ์เพียร์สันตัวเดียวกัน (`Correl(X, Y)`) คำนวณด้วย `double` เต็มความละเอียดแบบ Excel แล้วค่อยปัดเศษ 4 ตำแหน่งตอนเก็บผลลัพธ์สุดท้าย
 
@@ -115,14 +148,16 @@ FM-08 และ FM-09 ใช้สูตรสหสัมพันธ์เพ�
 
 | ไฟล์ | หน้าที่ |
 |---|---|
-| `Program.cs` | จุดเริ่มโปรแกรม อ่าน Argument เชื่อมต่อฐานข้อมูล สั่งรันทีละขั้น (NetDemand → Cleansing → Normality) โหลดเกณฑ์จาก `M_LOV` และข้อมูลยอดขาย แล้วแสดงผลสรุป |
+| `Program.cs` | จุดเริ่มโปรแกรม อ่าน Argument เชื่อมต่อฐานข้อมูล สั่งรันทีละขั้น (NetDemand → Cleansing → Normality → Sigma Capping) โหลดเกณฑ์จาก `M_LOV` และข้อมูลยอดขาย แล้วแสดงผลสรุป |
 | `src/NetDemand/` | คำนวณ Net Demand (FM-01, FM-02) และบันทึก Snapshot ลง `DRP_FCT_SKU_MONTHLY_DEMAND_PREP` |
 | `src/Cleansing/CleansingEngine.cs` | สูตร FM-03 ถึง FM-09 และการตัดสิน KEEP / PENDING ของทั้ง Gate 1 และ Gate 2 (ไม่ยุ่งกับฐานข้อมูล) |
 | `src/Cleansing/NormalityEngine.cs` | สูตร FM-10 ถึง FM-12 กฎ Triple Gate และการแยกสาย Sigma / IQR (ไม่ยุ่งกับฐานข้อมูล) |
+| `src/Cleansing/SigmaCappingEngine.cs` | สูตร FM-13 ถึง FM-14 การเลือก 2SIGMA / 3SIGMA และการตัดยอดรายเดือนของสายปกติ (ไม่ยุ่งกับฐานข้อมูล) |
 | `Tests/NetDemandTests.cs` | Unit Test ของ Net Demand ทั้ง 12 เคส (TC-02-01 ถึง TC-02-12) ตามที่ระบุใน Jira |
 | `Tests/Gate1.cs` | Unit Test ของ Keep Gate 1 ทั้ง 12 เคส (TC-03-01 ถึง TC-03-12) ตามที่ระบุใน Jira |
 | `Tests/Gate2.cs` | Unit Test ของ Keep Gate 2 ทั้ง 12 เคส (TC-04-01 ถึง TC-04-12) ตามที่ระบุใน Jira |
 | `Tests/NormalityTests.cs` | Unit Test ของ Normality Testing ทั้ง 10 เคส (TC-05-01 ถึง TC-05-10) ตามที่ระบุใน Jira เทียบผลด้วยความคลาดเคลื่อนไม่เกิน 0.0001 |
+| `Tests/SigmaCappingTests.cs` | Unit Test ของ Sigma Capping ทั้ง 8 เคส (TC-06-01 ถึง TC-06-08) ตามที่ระบุใน Jira |
 
 ## ข้อมูลที่ใช้
 
@@ -140,6 +175,8 @@ FM-08 และ FM-09 ใช้สูตรสหสัมพันธ์เพ�
 | `JB_PVALUE_THRESHOLD` | P-Value ขั้นต่ำ | 0.05 | Normality |
 | `SKEW_NORMAL_LIMIT` | ขีดจำกัดความเบ้ | 0.5 | Normality |
 | `KURT_NORMAL_LIMIT` | ขีดจำกัดความโด่ง | 1.0 | Normality |
+| `CV_THRESHOLD` | เกณฑ์ CV แบ่งวิธี 2SIGMA กับ 3SIGMA | 0.5 | Sigma Capping |
+| `SIGMA_CAP_MULTIPLIER` | ตัวคูณเพดานของวิธี 3SIGMA | 3.0 | Sigma Capping |
 
 การอ่านค่าจาก `M_LOV` ทุกตัวกรองเฉพาะแถวที่ `REC_STATUS = 'A'` หรือ `REC_STATUS IS NULL`
 
@@ -153,7 +190,7 @@ FM-08 และ FM-09 ใช้สูตรสหสัมพันธ์เพ�
 ## วิธีรัน
 
 ```bash
-# รันงานจริง (ต่อฐานข้อมูล): NetDemand → Gate 1 → Gate 2 → Normality Testing
+# รันงานจริง (ต่อฐานข้อมูล): NetDemand → Gate 1 → Gate 2 → Normality Testing → Sigma Capping
 # ทุกคลัง ด้วยงวดล่าสุดที่มีในระบบ
 dotnet run
 
@@ -170,7 +207,7 @@ dotnet run -- --period 202609 --warehouse CMPOS
 
 หลังรันงานจริงเสร็จ โปรแกรมจะรอให้กดปุ่มใดก็ได้ก่อนปิด ถ้าจะตั้งเวลารันอัตโนมัติ (เช่น scheduler) ควรเอา `Console.ReadKey()` ออกจาก `Program.cs`
 
-การรันงานจริงจะแสดงจำนวน KEEP / PENDING แยกตามเหตุผลและตามคลัง (รวมผลของทั้งสอง Gate) ตามด้วยสรุป Normality Testing คือจำนวน SKU ที่เป็น Normal (ไป PBI-06) และ Non-normal (ไป PBI-07) พร้อมแยกตามคลัง
+การรันงานจริงจะแสดงจำนวน KEEP / PENDING แยกตามเหตุผลและตามคลัง (รวมผลของทั้งสอง Gate) ตามด้วยสรุป Normality Testing คือจำนวน SKU ที่เป็น Normal (ไป PBI-06) และ Non-normal (ไป PBI-07) พร้อมแยกตามคลัง และสรุป Sigma Capping คือจำนวน SKU ที่ใช้ 2SIGMA / 3SIGMA, จำนวน SKU ที่มียอดถูกตัด และยอดรวมที่ถูกตัดทอน พร้อมแยกตามคลัง
 
 ## Unit Test (ไม่ต่อฐานข้อมูล)
 
@@ -188,6 +225,9 @@ dotnet run -- --test-gate2
 
 # Normality Testing
 dotnet run -- --test-normality
+
+# Sigma Capping
+dotnet run -- --test-sigma
 ```
 
 ทุกชุดแสดงผลในรูปแบบเดียวกัน คือทุกเคสแสดง Input ที่ส่งเข้าไป, ค่า Expected (คำตอบที่ควรได้ตามสเปก) และค่า Actual (ผลจริงจากการรันฟังก์ชัน) ให้เทียบกันตรงๆ ปิดท้ายด้วยสรุป PASS / FAIL ถ้าแถวไหนขึ้น `FAIL` แปลว่าค่าคำนวณไม่ตรงสเปก ต้องตรวจสอบ Logic ก่อนนำไปใช้งานจริง
@@ -202,4 +242,6 @@ dotnet run -- --test-normality
 
 **จาก Normality Testing:** เฉพาะ SKU ที่ยัง PENDING จะได้ผลลัพธ์เป็น `SkuNormalityResult` ที่มี `WarehouseCode`, `ItemId`, `Demand24M`, `HistoryMonths`, `AvgDemand`, `Sd`, `Skewness`, `Kurtosis`, `JbScore`, `JbPValue`, `IsNormal` เก็บในหน่วยความจำเช่นกัน และถูกแยกเป็น 2 กลุ่มผ่าน `NormalityEngine.Partition()` เพื่อส่งต่อให้ Sigma Capping (PBI-06) และ IQR Capping (PBI-07)
 
-> ขอบเขตของงานนี้ครอบคลุมถึง Net Demand, การคัดกรอง Gate 1, Gate 2 และการทดสอบ Normality (PBI-05) เท่านั้น ส่วนการตัดยอดแบบ Sigma Capping (PBI-06), IQR Capping (PBI-07) และการบันทึกลงตารางสะอาด (PBI-08) ยังไม่ได้ทำในโปรเจกต์นี้
+**จาก Sigma Capping:** เฉพาะ SKU สาย Normal จะได้ผลลัพธ์เป็น `CleansedDemandSeries` ที่มี `WarehouseCode`, `ItemId`, `OriginalDemand24M` (ยอดเดิม), `CleansedDemand24M` (ยอดหลังตัด), `QtyReduced24M` (ยอดที่ถูกตัด), `CleansingMethod` (`2SIGMA` หรือ `3SIGMA`), `CapLimit` พร้อม Metadata ที่ส่งต่อมาจาก Normality ครบ (`HistoryMonths`, `AvgDemand`, `Sd`, `Skewness`, `Kurtosis`, `JbPValue`) เก็บในหน่วยความจำเตรียมส่งต่อให้ขั้นตอนบันทึกชุดข้อมูลสะอาด (PBI-08)
+
+> ขอบเขตของงานนี้ครอบคลุมถึง Net Demand, การคัดกรอง Gate 1, Gate 2, การทดสอบ Normality (PBI-05) และการตัดยอดแบบ Sigma Capping (PBI-06) เท่านั้น ส่วนการตัดยอดแบบ IQR Capping (PBI-07) และการบันทึกลงตารางสะอาด (PBI-08) ยังไม่ได้ทำในโปรเจกต์นี้ ผลของ Sigma Capping จึงยังอยู่ในหน่วยความจำและยังไม่ถูกส่งต่อหรือบันทึกที่ไหน
