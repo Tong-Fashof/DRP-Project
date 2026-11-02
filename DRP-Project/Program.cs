@@ -15,12 +15,13 @@ namespace DRP_Project
         static void Main(string[] args)
         {
             // โหมด Unit Test: ตรวจก่อนต่อฐานข้อมูล แล้วจบโปรแกรมทันที
-            // รัน Unit Test (ไม่ต่อฐานข้อมูล): --test-netdemand | --test-gate1 | --test-gate2 | --test-normality | --test-sigma
+            // รัน Unit Test (ไม่ต่อฐานข้อมูล): --test-netdemand | --test-gate1 | --test-gate2 | --test-normality | --test-sigma | --test-iqr
             if (args.Contains("--test-netdemand")) { NetDemandTests.RunUnitTests(); return; }
             if (args.Contains("--test-gate1")) { Gate1.RunUnitTests(); return; }
             if (args.Contains("--test-gate2")) { Gate2.RunUnitTests(); return; }
             if (args.Contains("--test-normality")) { NormalityTests.RunUnitTests(); return; }
             if (args.Contains("--test-sigma")) { SigmaCappingTests.RunUnitTests(); return; }
+            if (args.Contains("--test-iqr")) { IqrCappingTests.RunUnitTests(); return; }
 
             if (!TryParseArgs(args)) return;   // Argument ผิดรูปแบบ -> จบโปรแกรม
 
@@ -42,11 +43,17 @@ namespace DRP_Project
 
                 // ===== STEP 3: Normality Testing (PBI-05) =====
                 // เฉพาะ SKU ที่ยัง PENDING: แยกสาย Normal -> PBI-06 Sigma / Non-normal -> PBI-07 IQR
-                var (normal, nonNormal) = RunNormality(connection, candidates);   // nonNormal -> PBI-07 (ยังไม่พัฒนา)
+                var (normal, nonNormal) = RunNormality(connection, candidates);   // nonNormal -> PBI-07 IQR Capping
 
                 // ===== STEP 4: Sigma Capping (PBI-06) =====
                 // เฉพาะสาย Normal: ตัดยอดส่วนเกินด้วย 2SIGMA / 3SIGMA แล้วส่งต่อ PBI-08
                 List<CleansedDemandSeries> cleansed = RunSigmaCapping(connection, normal);
+
+                // ===== STEP 5: IQR Capping (PBI-07) =====
+                // เฉพาะสาย Non-normal: ตัดยอดส่วนเกินด้วย 1.5IQR / 3.0IQR (หรือ KEEP เมื่อ IQR = 0) แล้วส่งต่อ PBI-08
+                List<CleansedDemandSeries> cleansedIqr = RunIqrCapping(connection, nonNormal);
+
+                Console.ReadKey();
             }
             catch (Exception ex)
             {
@@ -61,7 +68,7 @@ namespace DRP_Project
         // คืน false ถ้า --period รูปแบบไม่ถูกต้อง (ตรวจโดยลองแปลง yyyyMM + "01" เป็นวันที่)
         // ======================================================
         private static bool TryParseArgs(string[] args)
-        {
+        {   
             for (int i = 0; i < args.Length; i++)
             {
                 if (args[i] == "--warehouse" && i + 1 < args.Length)
@@ -302,6 +309,42 @@ namespace DRP_Project
             {
                 int capped = g.Count(c => c.QtyReduced24M.Any(q => q > 0m));
                 Console.WriteLine($"{g.Key,-12} รวม {g.Count(),7:N0} | 2SIGMA {g.Count(c => c.CleansingMethod == SigmaCappingEngine.Method2Sigma),7:N0} | 3SIGMA {g.Count(c => c.CleansingMethod == SigmaCappingEngine.Method3Sigma),7:N0} | ถูกตัด {capped,7:N0}");
+            }
+
+            return cleansed;
+        }
+
+        // ======================================================
+        // PBI-07: โหลดเกณฑ์ SKEW_MODERATE_LIMIT / KURT_MODERATE_LIMIT จาก M_LOV (ไม่พบ -> Default 1.0 / 3.0)
+        // -> ตัดยอดส่วนเกินสาย Non-normal ด้วย 1.5IQR (เหวี่ยงปานกลาง) / 3.0IQR (เหวี่ยงรุนแรง) / KEEP (IQR = 0)
+        // ผลลัพธ์ List<CleansedDemandSeries> ต้องส่งต่อให้ PBI-08 (Cleansed Dataset Finalize Engine)
+        // ======================================================
+        static List<CleansedDemandSeries> RunIqrCapping(SqlConnection connection, List<SkuNormalityResult> nonNormal)
+        {
+            decimal skewModerateLimit = LoadLovDecimal(connection, "SKEW_MODERATE_LIMIT", IqrCappingEngine.DefaultSkewModerateLimit);
+            decimal kurtModerateLimit = LoadLovDecimal(connection, "KURT_MODERATE_LIMIT", IqrCappingEngine.DefaultKurtModerateLimit);
+
+            List<CleansedDemandSeries> cleansed = IqrCappingEngine.CapAll(nonNormal, skewModerateLimit, kurtModerateLimit);
+
+            int cappedSkus = cleansed.Count(c => c.QtyReduced24M.Any(q => q > 0m));
+            decimal totalReduced = cleansed.Sum(c => c.QtyReduced24M.Sum());
+
+            Console.WriteLine();
+            Console.WriteLine("--- IQR Capping : ตัดยอดส่วนเกินสาย Non-normal ---");
+            Console.WriteLine($"เกณฑ์: SKEW_MODERATE_LIMIT = {skewModerateLimit}, KURT_MODERATE_LIMIT = {kurtModerateLimit}");
+            Console.WriteLine($"Input (Non-normal)      : {nonNormal.Count}");
+            Console.WriteLine($"1.5IQR                  : {cleansed.Count(c => c.CleansingMethod == IqrCappingEngine.Method15Iqr)}");
+            Console.WriteLine($"3.0IQR                  : {cleansed.Count(c => c.CleansingMethod == IqrCappingEngine.Method30Iqr)}");
+            Console.WriteLine($"KEEP (Zero IQR)         : {cleansed.Count(c => c.CleansingMethod == IqrCappingEngine.MethodKeep)}");
+            Console.WriteLine($"SKU ที่มียอดถูกตัด        : {cappedSkus}");
+            Console.WriteLine($"ยอดรวมที่ถูกตัดทอน        : {totalReduced:N4}");
+
+            Console.WriteLine();
+            Console.WriteLine("--- IQR Capping : แยกตามคลัง ---");
+            foreach (var g in cleansed.GroupBy(c => c.WarehouseCode).OrderBy(g => g.Key, StringComparer.Ordinal))
+            {
+                int capped = g.Count(c => c.QtyReduced24M.Any(q => q > 0m));
+                Console.WriteLine($"{g.Key,-12} รวม {g.Count(),7:N0} | 1.5IQR {g.Count(c => c.CleansingMethod == IqrCappingEngine.Method15Iqr),7:N0} | 3.0IQR {g.Count(c => c.CleansingMethod == IqrCappingEngine.Method30Iqr),7:N0} | KEEP {g.Count(c => c.CleansingMethod == IqrCappingEngine.MethodKeep),7:N0} | ถูกตัด {capped,7:N0}");
             }
 
             return cleansed;
