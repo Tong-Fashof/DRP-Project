@@ -1,13 +1,14 @@
 # DRP_Project
 
-Console App ของระบบ DRP สำหรับเตรียมข้อมูลยอดขายและตัดยอด Outlier รันต่อเนื่องในโปรแกรมเดียว 4 ขั้นตอน
+Console App ของระบบ DRP สำหรับเตรียมข้อมูลยอดขายและตัดยอด Outlier รันต่อเนื่องในโปรแกรมเดียว 5 ขั้นตอน
 
 1. **Net Demand Preprocessing** คำนวณยอดความต้องการขายที่แท้จริง (True Demand) รายเดือนของแต่ละ SKU ในแต่ละคลัง
 2. **Cleansing (Keep Gate 1 และ Gate 2)** คัดกรองสินค้าที่ไม่ควรถูกตัดยอดขาย
 3. **Normality Testing** ทดสอบการแจกแจงแบบปกติ เพื่อเลือกวิธีตัดยอดให้เหมาะกับสินค้าแต่ละตัว
 4. **Sigma Capping** ตัดยอดขายเดือนที่พุ่งสูงผิดปกติของสินค้าสายปกติ ด้วยเพดาน 2-Sigma หรือ 3-Sigma
+5. **IQR Capping** ตัดยอดขายเดือนที่พุ่งสูงผิดปกติของสินค้าสายไม่ปกติ (ยอดเบ้หรือเหวี่ยง) ด้วยเพดาน 1.5 IQR หรือ 3.0 IQR
 
-อ้างอิงงาน **PBI-02** Net Demand Preprocessing, **SCRUM-14 [PBI-03]** เกณฑ์คุ้มครอง Keep Gate 1, **SCRUM-15 [PBI-04]** เกณฑ์คุ้มครอง Keep Gate 2, **SCRUM-16 [PBI-05]** ทดสอบการแจกแจงแบบปกติทางสถิติ และ **SCRUM-17 [PBI-06]** ตัดยอดส่วนเกินสายปกติ 2-Sigma และ 3-Sigma Capping
+อ้างอิงงาน **PBI-02** Net Demand Preprocessing, **SCRUM-14 [PBI-03]** เกณฑ์คุ้มครอง Keep Gate 1, **SCRUM-15 [PBI-04]** เกณฑ์คุ้มครอง Keep Gate 2, **SCRUM-16 [PBI-05]** ทดสอบการแจกแจงแบบปกติทางสถิติ **SCRUM-17 [PBI-06]** ตัดยอดส่วนเกินสายปกติ 2-Sigma และ 3-Sigma Capping และ **SCRUM-18 [PBI-07]** ตัดยอดส่วนเกินสายยอดเหวี่ยงไม่ปกติ 1.5 IQR และ 3.0 IQR Capping
 
 
 ## Net Demand Preprocessing (PBI-02)
@@ -123,6 +124,41 @@ SKU ที่ผ่านการทดสอบ Normality (`IsNormal = true`) 
 - รับเฉพาะ SKU ที่ `IsNormal = true` ถ้าส่ง SKU สาย Non-normal เข้ามา หรือข้อมูลไม่ครบ 24 งวด จะแจ้ง error
 - ยอดขายเดิม 24 งวดถูกคัดลอกเก็บไว้ใน `OriginalDemand24M` จึงไม่กระทบอาเรย์ต้นทาง
 
+## ตัดยอดส่วนเกินสายไม่ปกติ (IQR Capping) (PBI-07)
+
+SKU ที่ไม่ผ่านการทดสอบ Normality (`IsNormal = false`) จะเข้าขั้นตอนนี้ ยอดขายของสินค้ากลุ่มนี้มักเบ้หรือเหวี่ยงแรง ทำให้ค่า SD เพี้ยนจนใช้เป็นเพดานไม่ได้ ระบบจึงใช้ควอร์ไทล์ซึ่งทนต่อค่าผิดปกติแทน ตัดเฉพาะยอดเดือนที่พุ่งสูงเกินเพดานให้ลงมาอยู่ที่ระดับเพดาน ขั้นตอนนี้ทำในหน่วยความจำทั้งหมด ไม่เขียนลงฐานข้อมูล
+
+**ทำอะไรบ้าง (ทีละ SKU)**
+
+1. เรียงยอดขาย 24 เดือนจากน้อยไปมาก แล้วหา Q1 (ตำแหน่ง 25%) และ Q3 (ตำแหน่ง 75%) แบบเดียวกับ `PERCENTILE.INC` ของ Excel โดยประมาณค่าเชิงเส้นระหว่างสองตำแหน่งที่คร่อมอยู่ ข้อมูล 24 งวดทำให้ Q1 อยู่ที่ตำแหน่ง 5.75 และ Q3 อยู่ที่ตำแหน่ง 17.25
+2. คำนวณ `IQR = Q3 - Q1` ถ้า IQR เท่ากับ 0.0000 (ยอดนิ่งหรือซ้ำกันเกือบทั้งหมดจนไม่มีความกว้างของช่วง) จะกำหนดเป็น `KEEP` ทันที ไม่ตัดยอดใดๆ และ `CapLimit = 0.0000`
+3. ถ้า IQR ไม่เป็น 0 เลือกวิธีตัดยอดจากความเบ้และความโด่งที่ได้จากขั้น Normality
+
+| เงื่อนไข | วิธี | ตัวคูณ |
+|---|---|---|
+| `IQR = 0` | `KEEP` | ไม่ตัดยอด คง `CapLimit = 0` |
+| `\|Skewness\| ≤ SKEW_MODERATE_LIMIT` และ `\|Kurtosis\| ≤ KURT_MODERATE_LIMIT` (เหวี่ยงปานกลาง) | `1.5IQR` | 1.5 คงที่ |
+| เกินเกณฑ์ข้อใดข้อหนึ่ง (เหวี่ยงรุนแรง) | `3.0IQR` | 3.0 คงที่ |
+
+4. คำนวณเพดานบน `CapLimit = Q3 + ตัวคูณ × IQR` ปัดเศษ 4 ตำแหน่ง
+5. ตรวจยอดขายทั้ง 24 เดือน เดือนไหนสูงกว่า `CapLimit` จะถูกกดลงมาเท่ากับ `CapLimit` พอดี และเก็บส่วนที่ตัดออกไว้ใน `QtyReduced24M` ส่วนเดือนที่ไม่เกินเพดานคงยอดเดิม 100%
+
+**ตัวอย่าง** ยาเกลือแร่ (ORS) ขายได้ 38 ถึง 45 กล่องต่อเดือน แต่เดือนที่ 11 พุ่งไปที่ 68 กล่อง ได้ Q1 = 39, Q3 = 44, IQR = 5 ความเบ้ 0.65 และความโด่ง 1.8 อยู่ในเกณฑ์ปานกลาง จึงใช้ 1.5IQR เพดานคือ 44 + 1.5 × 5 = 51.5 กล่อง เดือนที่ 11 ถูกตัดเหลือ 51.5 (ตัดออก 16.5 กล่อง) ส่วนอีก 23 เดือนไม่เกินเพดาน จึงคงยอดเดิม
+
+**รายละเอียดการคำนวณที่ควรรู้**
+
+- ตัดเฉพาะยอดที่สูงเกินเพดานด้านบน ไม่มีการเติมยอดเดือนที่ต่ำผิดปกติ
+- ยอดที่เท่ากับเพดานพอดีไม่นับว่าเป็นการตัดยอด (เทียบด้วย `>` ไม่ใช่ `>=`) และถ้าความเบ้หรือความโด่งเท่ากับเกณฑ์พอดี จะใช้ 1.5IQR
+- ความโด่งที่ใช้เป็นแบบส่วนเกิน (Excess Kurtosis) เหมือนที่คำนวณในขั้น Normality ดังนั้นเกณฑ์ 3.0 หมายถึงความโด่งส่วนเกินเกิน 3.0
+- ตัวคูณ 1.5 และ 3.0 คงที่ตามมาตรฐาน Tukey ไม่อ่านจาก `M_LOV` อ่านเฉพาะ `SKEW_MODERATE_LIMIT` และ `KURT_MODERATE_LIMIT` ถ้าไม่พบค่าหรือแปลงค่าไม่ได้ จะใช้ค่าเริ่มต้น (1.0 และ 3.0) และแสดงคำเตือน `[WARN]`
+- กรณี `KEEP` ระบบคงยอดเดิมทุกงวดโดยตรง ไม่ได้กดยอดด้วย `CapLimit = 0` (ซึ่งจะทำให้ยอดสะอาดกลายเป็น 0 ทั้งหมด)
+- การตรวจว่า IQR เป็น 0 เทียบหลังปัดเศษ 4 ตำแหน่ง ถ้า IQR เล็กจนปัดแล้วเป็น 0.0000 จะถือเป็น `KEEP`
+- ทุกเดือนต้องเป็นไปตาม `ยอดสะอาด + ยอดที่ตัด = ยอดเดิม` โค้ดตรวจให้ทุกครั้งทั้งกรณีตัดยอดและกรณี `KEEP` ถ้าไม่ตรงจะหยุดพร้อมแจ้ง error
+- ใช้ `decimal` ตลอดการคำนวณ ปัดเศษเฉพาะ `CapLimit` ที่ 4 ตำแหน่งแบบ `MidpointRounding.AwayFromZero`
+- รับเฉพาะ SKU ที่ `IsNormal = false` ถ้าส่ง SKU สายปกติเข้ามา หรือข้อมูลไม่ครบ 24 งวด จะแจ้ง error
+- การเรียงลำดับทำบนสำเนาแยก ยอดขายเดิม 24 งวดจึงคงลำดับเดือนเดิมและถูกคัดลอกเก็บไว้ใน `OriginalDemand24M` ไม่กระทบอาเรย์ต้นทาง
+- ผลลัพธ์ใช้โครงสร้าง `CleansedDemandSeries` ตัวเดียวกับ Sigma Capping ทำให้ขั้นตอนบันทึกชุดข้อมูลสะอาด (PBI-08) รับผลจากทั้งสองสายได้ในรูปแบบเดียวกัน
+
 ## สูตรที่ใช้
 
 | สูตร | ค่าที่คำนวณ | วิธีคิด |
@@ -141,6 +177,7 @@ SKU ที่ผ่านการทดสอบ Normality (`IsNormal = true`) 
 | FM-12 | JbScore, JbPValue | คะแนน Jarque-Bera ปรับแก้ขนาดตัวอย่างตามสูตรเซลล์ AI2 ของ Template V1 และค่า `JbPValue = exp(-JbScore / 2)` |
 | FM-13 | CV | `SD / AvgDemand` (ถ้า AvgDemand = 0 ให้ CV = 0) ใช้เลือกวิธี 2SIGMA หรือ 3SIGMA |
 | FM-14 | CapLimit, CleansedDemand, QtyReduced | `CapLimit = AvgDemand + ตัวคูณ × SD` (ตัวคูณ 2.0 หรือ `SIGMA_CAP_MULTIPLIER`) เดือนที่เกินเพดานถูกกดเหลือเท่า CapLimit และส่วนที่ตัดเก็บใน QtyReduced |
+| FM-15 | Q1, Q3, IQR, CapLimit, CleansedDemand, QtyReduced | Q1 และ Q3 คือเปอร์เซ็นไทล์ที่ 25% และ 75% ของยอดขาย 24 เดือนแบบ `PERCENTILE.INC`, `IQR = Q3 - Q1`, `CapLimit = Q3 + ตัวคูณ × IQR` (ตัวคูณ 1.5 หรือ 3.0) ถ้า IQR = 0 ใช้ `KEEP` ไม่ตัดยอด เดือนที่เกินเพดานถูกกดเหลือเท่า CapLimit และส่วนที่ตัดเก็บใน QtyReduced |
 
 FM-08 และ FM-09 ใช้สูตรสหสัมพันธ์เพียร์สันตัวเดียวกัน (`Correl(X, Y)`) คำนวณด้วย `double` เต็มความละเอียดแบบ Excel แล้วค่อยปัดเศษ 4 ตำแหน่งตอนเก็บผลลัพธ์สุดท้าย
 
@@ -148,16 +185,18 @@ FM-08 และ FM-09 ใช้สูตรสหสัมพันธ์เพ�
 
 | ไฟล์ | หน้าที่ |
 |---|---|
-| `Program.cs` | จุดเริ่มโปรแกรม อ่าน Argument เชื่อมต่อฐานข้อมูล สั่งรันทีละขั้น (NetDemand → Cleansing → Normality → Sigma Capping) โหลดเกณฑ์จาก `M_LOV` และข้อมูลยอดขาย แล้วแสดงผลสรุป |
+| `Program.cs` | จุดเริ่มโปรแกรม อ่าน Argument เชื่อมต่อฐานข้อมูล สั่งรันทีละขั้น (NetDemand → Cleansing → Normality → Sigma Capping → IQR Capping) โหลดเกณฑ์จาก `M_LOV` และข้อมูลยอดขาย แล้วแสดงผลสรุป |
 | `src/NetDemand/` | คำนวณ Net Demand (FM-01, FM-02) และบันทึก Snapshot ลง `DRP_FCT_SKU_MONTHLY_DEMAND_PREP` |
 | `src/Cleansing/CleansingEngine.cs` | สูตร FM-03 ถึง FM-09 และการตัดสิน KEEP / PENDING ของทั้ง Gate 1 และ Gate 2 (ไม่ยุ่งกับฐานข้อมูล) |
 | `src/Cleansing/NormalityEngine.cs` | สูตร FM-10 ถึง FM-12 กฎ Triple Gate และการแยกสาย Sigma / IQR (ไม่ยุ่งกับฐานข้อมูล) |
 | `src/Cleansing/SigmaCappingEngine.cs` | สูตร FM-13 ถึง FM-14 การเลือก 2SIGMA / 3SIGMA และการตัดยอดรายเดือนของสายปกติ (ไม่ยุ่งกับฐานข้อมูล) |
+| `src/Cleansing/IqrCappingEngine.cs` | สูตร FM-15 การหา Q1/Q3 แบบ `PERCENTILE.INC` การเลือก KEEP / 1.5IQR / 3.0IQR และการตัดยอดรายเดือนของสายไม่ปกติ ใช้ `CleansedDemandSeries` ที่ประกาศไว้ใน `SigmaCappingEngine.cs` ร่วมกัน (ไม่ยุ่งกับฐานข้อมูล) |
 | `Tests/NetDemandTests.cs` | Unit Test ของ Net Demand ทั้ง 12 เคส (TC-02-01 ถึง TC-02-12) ตามที่ระบุใน Jira |
 | `Tests/Gate1.cs` | Unit Test ของ Keep Gate 1 ทั้ง 12 เคส (TC-03-01 ถึง TC-03-12) ตามที่ระบุใน Jira |
 | `Tests/Gate2.cs` | Unit Test ของ Keep Gate 2 ทั้ง 12 เคส (TC-04-01 ถึง TC-04-12) ตามที่ระบุใน Jira |
 | `Tests/NormalityTests.cs` | Unit Test ของ Normality Testing ทั้ง 10 เคส (TC-05-01 ถึง TC-05-10) ตามที่ระบุใน Jira เทียบผลด้วยความคลาดเคลื่อนไม่เกิน 0.0001 |
 | `Tests/SigmaCappingTests.cs` | Unit Test ของ Sigma Capping ทั้ง 8 เคส (TC-06-01 ถึง TC-06-08) ตามที่ระบุใน Jira |
+| `Tests/IqrCappingTests.cs` | Unit Test ของ IQR Capping ทั้ง 8 เคส (TC-07-01 ถึง TC-07-08) ตามที่ระบุใน Jira |
 
 ## ข้อมูลที่ใช้
 
@@ -177,6 +216,8 @@ FM-08 และ FM-09 ใช้สูตรสหสัมพันธ์เพ�
 | `KURT_NORMAL_LIMIT` | ขีดจำกัดความโด่ง | 1.0 | Normality |
 | `CV_THRESHOLD` | เกณฑ์ CV แบ่งวิธี 2SIGMA กับ 3SIGMA | 0.5 | Sigma Capping |
 | `SIGMA_CAP_MULTIPLIER` | ตัวคูณเพดานของวิธี 3SIGMA | 3.0 | Sigma Capping |
+| `SKEW_MODERATE_LIMIT` | ขีดจำกัดความเบ้ที่ยังนับเป็นเหวี่ยงปานกลาง (ใช้ 1.5IQR) | 1.0 | IQR Capping |
+| `KURT_MODERATE_LIMIT` | ขีดจำกัดความโด่งที่ยังนับเป็นเหวี่ยงปานกลาง (ใช้ 1.5IQR) | 3.0 | IQR Capping |
 
 การอ่านค่าจาก `M_LOV` ทุกตัวกรองเฉพาะแถวที่ `REC_STATUS = 'A'` หรือ `REC_STATUS IS NULL`
 
@@ -190,7 +231,7 @@ FM-08 และ FM-09 ใช้สูตรสหสัมพันธ์เพ�
 ## วิธีรัน
 
 ```bash
-# รันงานจริง (ต่อฐานข้อมูล): NetDemand → Gate 1 → Gate 2 → Normality Testing → Sigma Capping
+# รันงานจริง (ต่อฐานข้อมูล): NetDemand → Gate 1 → Gate 2 → Normality Testing → Sigma Capping → IQR Capping
 # ทุกคลัง ด้วยงวดล่าสุดที่มีในระบบ
 dotnet run
 
@@ -207,7 +248,7 @@ dotnet run -- --period 202609 --warehouse CMPOS
 
 หลังรันงานจริงเสร็จ โปรแกรมจะรอให้กดปุ่มใดก็ได้ก่อนปิด ถ้าจะตั้งเวลารันอัตโนมัติ (เช่น scheduler) ควรเอา `Console.ReadKey()` ออกจาก `Program.cs`
 
-การรันงานจริงจะแสดงจำนวน KEEP / PENDING แยกตามเหตุผลและตามคลัง (รวมผลของทั้งสอง Gate) ตามด้วยสรุป Normality Testing คือจำนวน SKU ที่เป็น Normal (ไป PBI-06) และ Non-normal (ไป PBI-07) พร้อมแยกตามคลัง และสรุป Sigma Capping คือจำนวน SKU ที่ใช้ 2SIGMA / 3SIGMA, จำนวน SKU ที่มียอดถูกตัด และยอดรวมที่ถูกตัดทอน พร้อมแยกตามคลัง
+การรันงานจริงจะแสดงจำนวน KEEP / PENDING แยกตามเหตุผลและตามคลัง (รวมผลของทั้งสอง Gate) ตามด้วยสรุป Normality Testing คือจำนวน SKU ที่เป็น Normal (ไป PBI-06) และ Non-normal (ไป PBI-07) พร้อมแยกตามคลัง สรุป Sigma Capping คือจำนวน SKU ที่ใช้ 2SIGMA / 3SIGMA, จำนวน SKU ที่มียอดถูกตัด และยอดรวมที่ถูกตัดทอน พร้อมแยกตามคลัง และสรุป IQR Capping คือจำนวน SKU ที่ใช้ 1.5IQR / 3.0IQR / KEEP, จำนวน SKU ที่มียอดถูกตัด และยอดรวมที่ถูกตัดทอน พร้อมแยกตามคลัง
 
 ## Unit Test (ไม่ต่อฐานข้อมูล)
 
@@ -228,6 +269,9 @@ dotnet run -- --test-normality
 
 # Sigma Capping
 dotnet run -- --test-sigma
+
+# IQR Capping
+dotnet run -- --test-iqr
 ```
 
 ทุกชุดแสดงผลในรูปแบบเดียวกัน คือทุกเคสแสดง Input ที่ส่งเข้าไป, ค่า Expected (คำตอบที่ควรได้ตามสเปก) และค่า Actual (ผลจริงจากการรันฟังก์ชัน) ให้เทียบกันตรงๆ ปิดท้ายด้วยสรุป PASS / FAIL ถ้าแถวไหนขึ้น `FAIL` แปลว่าค่าคำนวณไม่ตรงสเปก ต้องตรวจสอบ Logic ก่อนนำไปใช้งานจริง
@@ -244,4 +288,6 @@ dotnet run -- --test-sigma
 
 **จาก Sigma Capping:** เฉพาะ SKU สาย Normal จะได้ผลลัพธ์เป็น `CleansedDemandSeries` ที่มี `WarehouseCode`, `ItemId`, `OriginalDemand24M` (ยอดเดิม), `CleansedDemand24M` (ยอดหลังตัด), `QtyReduced24M` (ยอดที่ถูกตัด), `CleansingMethod` (`2SIGMA` หรือ `3SIGMA`), `CapLimit` พร้อม Metadata ที่ส่งต่อมาจาก Normality ครบ (`HistoryMonths`, `AvgDemand`, `Sd`, `Skewness`, `Kurtosis`, `JbPValue`) เก็บในหน่วยความจำเตรียมส่งต่อให้ขั้นตอนบันทึกชุดข้อมูลสะอาด (PBI-08)
 
-> ขอบเขตของงานนี้ครอบคลุมถึง Net Demand, การคัดกรอง Gate 1, Gate 2, การทดสอบ Normality (PBI-05) และการตัดยอดแบบ Sigma Capping (PBI-06) เท่านั้น ส่วนการตัดยอดแบบ IQR Capping (PBI-07) และการบันทึกลงตารางสะอาด (PBI-08) ยังไม่ได้ทำในโปรเจกต์นี้ ผลของ Sigma Capping จึงยังอยู่ในหน่วยความจำและยังไม่ถูกส่งต่อหรือบันทึกที่ไหน
+**จาก IQR Capping:** เฉพาะ SKU สาย Non-normal จะได้ผลลัพธ์เป็น `CleansedDemandSeries` โครงสร้างเดียวกับ Sigma Capping ต่างกันที่ `CleansingMethod` ซึ่งเป็น `1.5IQR`, `3.0IQR` หรือ `KEEP` (กรณี `KEEP` ค่า `CapLimit` เป็น 0.0000 และ `CleansedDemand24M` เท่ากับยอดเดิมทุกงวด) พร้อม Metadata ที่ส่งต่อมาจาก Normality ครบเช่นกัน เก็บในหน่วยความจำเตรียมส่งต่อให้ PBI-08
+
+> ขอบเขตของงานนี้ครอบคลุมถึง Net Demand, การคัดกรอง Gate 1, Gate 2, การทดสอบ Normality (PBI-05), การตัดยอดแบบ Sigma Capping (PBI-06) และการตัดยอดแบบ IQR Capping (PBI-07) เท่านั้น ส่วนการบันทึกลงตารางสะอาด (PBI-08) ยังไม่ได้ทำในโปรเจกต์นี้ ผลของ Sigma Capping และ IQR Capping จึงยังอยู่ในหน่วยความจำและยังไม่ถูกส่งต่อหรือบันทึกที่ไหน
