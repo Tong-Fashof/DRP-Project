@@ -1,14 +1,15 @@
 # DRP_Project
 
-Console App ของระบบ DRP สำหรับเตรียมข้อมูลยอดขายและตัดยอด Outlier รันต่อเนื่องในโปรแกรมเดียว 5 ขั้นตอน
+Console App ของระบบ DRP สำหรับเตรียมข้อมูลยอดขายและตัดยอด Outlier รันต่อเนื่องในโปรแกรมเดียว 6 ขั้นตอน
 
 1. **Net Demand Preprocessing** คำนวณยอดความต้องการขายที่แท้จริง (True Demand) รายเดือนของแต่ละ SKU ในแต่ละคลัง
 2. **Cleansing (Keep Gate 1 และ Gate 2)** คัดกรองสินค้าที่ไม่ควรถูกตัดยอดขาย
 3. **Normality Testing** ทดสอบการแจกแจงแบบปกติ เพื่อเลือกวิธีตัดยอดให้เหมาะกับสินค้าแต่ละตัว
 4. **Sigma Capping** ตัดยอดขายเดือนที่พุ่งสูงผิดปกติของสินค้าสายปกติ ด้วยเพดาน 2-Sigma หรือ 3-Sigma
 5. **IQR Capping** ตัดยอดขายเดือนที่พุ่งสูงผิดปกติของสินค้าสายไม่ปกติ (ยอดเบ้หรือเหวี่ยง) ด้วยเพดาน 1.5 IQR หรือ 3.0 IQR
+6. **Cleansed Dataset Finalize** รวมผลจากทุกสายเป็นชุดข้อมูลสะอาด 24 เดือน คำนวณสถิติใหม่จากยอดสะอาด แล้วบันทึกประวัติการตัดยอดรายเดือนลงฐานข้อมูล
 
-อ้างอิงงาน **PBI-02** Net Demand Preprocessing, **SCRUM-14 [PBI-03]** เกณฑ์คุ้มครอง Keep Gate 1, **SCRUM-15 [PBI-04]** เกณฑ์คุ้มครอง Keep Gate 2, **SCRUM-16 [PBI-05]** ทดสอบการแจกแจงแบบปกติทางสถิติ **SCRUM-17 [PBI-06]** ตัดยอดส่วนเกินสายปกติ 2-Sigma และ 3-Sigma Capping และ **SCRUM-18 [PBI-07]** ตัดยอดส่วนเกินสายยอดเหวี่ยงไม่ปกติ 1.5 IQR และ 3.0 IQR Capping
+อ้างอิงงาน **PBI-02** Net Demand Preprocessing, **SCRUM-14 [PBI-03]** เกณฑ์คุ้มครอง Keep Gate 1, **SCRUM-15 [PBI-04]** เกณฑ์คุ้มครอง Keep Gate 2, **SCRUM-16 [PBI-05]** ทดสอบการแจกแจงแบบปกติทางสถิติ **SCRUM-17 [PBI-06]** ตัดยอดส่วนเกินสายปกติ 2-Sigma และ 3-Sigma Capping และ **SCRUM-18 [PBI-07]** ตัดยอดส่วนเกินสายยอดเหวี่ยงไม่ปกติ 1.5 IQR และ 3.0 IQR Capping และ **SCRUM-19 [PBI-08]** สรุปชุดข้อมูลยอดขายสะอาดหลังคลีนซิ่ง 24 เดือน และการคำนวณสถิติใหม่ประจำงวด
 
 
 ## Net Demand Preprocessing (PBI-02)
@@ -159,6 +160,61 @@ SKU ที่ไม่ผ่านการทดสอบ Normality (`IsNormal 
 - การเรียงลำดับทำบนสำเนาแยก ยอดขายเดิม 24 งวดจึงคงลำดับเดือนเดิมและถูกคัดลอกเก็บไว้ใน `OriginalDemand24M` ไม่กระทบอาเรย์ต้นทาง
 - ผลลัพธ์ใช้โครงสร้าง `CleansedDemandSeries` ตัวเดียวกับ Sigma Capping ทำให้ขั้นตอนบันทึกชุดข้อมูลสะอาด (PBI-08) รับผลจากทั้งสองสายได้ในรูปแบบเดียวกัน
 
+## สรุปชุดข้อมูลสะอาดและบันทึกประวัติการตัดยอด (PBI-08)
+
+เป็นขั้นตอนสุดท้ายของงาน รวมผลจากทุกสายที่ผ่านการคัดกรองมาเป็นชุดข้อมูลสะอาด 24 เดือนชุดเดียว แล้วคำนวณค่าสถิติใหม่จากยอดที่สะอาดแล้ว จากนั้นทำ 2 อย่างพร้อมกัน คือบันทึกประวัติการตัดยอดรายเดือนลงฐานข้อมูลไว้ตรวจย้อนหลัง และส่งชุดสถิติสะอาดต่อในหน่วยความจำให้ขั้นตอนเลือกโมเดลพยากรณ์ (Stage 1.2 คือ PBI-09 ถึง PBI-12)
+
+**ข้อมูลที่รวมเข้ามา** มาจาก 3 สาย
+
+| สาย | มาจากขั้นตอน | วิธีคลีนซิ่งที่ได้ |
+|---|---|---|
+| KEEP จาก Gate 1 และ Gate 2 | Cleansing (PBI-03, PBI-04) | `KEEP` |
+| สายปกติ | Sigma Capping (PBI-06) | `2SIGMA` หรือ `3SIGMA` |
+| สายไม่ปกติ | IQR Capping (PBI-07) | `1.5IQR`, `3.0IQR` หรือ `KEEP` (กรณี IQR เป็น 0) |
+
+สาย KEEP จาก Gate 1 และ Gate 2 ไม่ได้ผ่านการตัดยอดและไม่ได้ผ่านการทดสอบ Normality ระบบจึงแปลงให้อยู่ในรูปแบบเดียวกับสายอื่น โดยให้ยอดสะอาดเท่ายอดเดิมทุกเดือน ยอดที่ตัดเป็น 0 `CapLimit = 0` และค่า `Skewness`, `Kurtosis`, `JbPValue` เป็น `null` ส่วนสาย `KEEP` ที่มาจากกรณี IQR เป็น 0 เคยผ่าน Normality มาแล้ว จึงยังมีค่าสามตัวนี้ตามจริง
+
+**ทำอะไรบ้าง**
+
+1. รวมทั้ง 3 สายเป็นรายการเดียว
+2. คำนวณสถิติสะอาด 7 ค่า จากยอดสะอาด 24 เดือนของแต่ละ SKU โดยใช้ฟังก์ชันชุดเดียวกับที่ใช้ตอน Gate 1 และ Gate 2 ทุกตัว ทำให้สูตรและเงื่อนไขป้องกันเหมือนกันทุก SKU
+
+| ค่าสถิติ | วิธีคิด | คืนค่า 0 เมื่อ |
+|---|---|---|
+| `CleanMean` | ยอดสะอาดรวม 24 เดือน / 24 | ไม่มี |
+| `CleanSd` | SD แบบ sample (หารด้วย 23) | ยอดเฉลี่ยเป็น 0 |
+| `CleanCv` | `CleanSd / CleanMean` | ยอดเฉลี่ยเป็น 0 |
+| `CleanActiveMonths` | จำนวนเดือนที่ยอดสะอาด > 0 | ไม่มี |
+| `CleanAdi` | `24 / CleanActiveMonths` | ไม่มีเดือนที่มียอดเลย |
+| `CleanTrendR` | สหสัมพันธ์ยอดขายกับเวลา บน Active Window | ประวัติ < 12 เดือน หรือยอดนิ่งสนิท |
+| `CleanSeasonalR` | สหสัมพันธ์ฤดูกาล Lag-12 แบบขจัดแนวโน้ม | ประวัติ < 24 เดือน, ปีใดปีหนึ่งนิ่งสนิท หรือยอดเป็นเส้นตรงสมบูรณ์กับเวลา |
+
+3. บรรจุผลลงอ็อบเจกต์ `CleansedSkuDemandDto` (15 พร็อพเพอร์ตี้) เพื่อส่งต่อ Stage 1.2
+4. สร้างแถวประวัติรายเดือน 24 แถวต่อ SKU (แม้เดือนที่ไม่มียอดก็ต้องมีแถว)
+5. บันทึกลงตาราง `DRP_FCT_SKU_OUTLIER_CLEANSING`
+
+**ตัวอย่าง** ยาเกลือแร่ (ORS) ตัวเดียวกับตัวอย่าง IQR ด้านบน ยอดเดิมรวม 24 เดือนคือ 1,024 กล่อง หลังเดือนที่ 11 ถูกตัดจาก 68 เหลือ 51.5 ยอดสะอาดรวมเหลือ 1,007.5 กล่อง ค่าสถิติที่คำนวณใหม่ได้ `CleanMean = 41.9792`, `CleanSd = 3.1776`, `CleanCv = 0.0757`, `CleanActiveMonths = 24`, `CleanAdi = 1.0000`, `CleanTrendR = 0.1717` และ `CleanSeasonalR = 0.2536` ส่วนในตารางประวัติ เดือนที่ 11 จะมี `qty_reduced = 16.5` และ `outlier_status = HIGH_OUTLIER` อีก 23 เดือนเป็น `NORMAL`
+
+### ⚠️ พฤติกรรมสำคัญที่ต้องรู้ก่อนรัน (Idempotency)
+
+เหมือนกับ Net Demand คือการรันซ้ำจะ **ลบข้อมูลเก่าก่อนบันทึกใหม่เสมอ**
+
+- **ไม่ระบุคลัง** → ลบข้อมูล**ทั้งตาราง** (TRUNCATE) แล้วบันทึกใหม่ครบทุกคลัง
+- **ระบุคลัง** → ลบข้อมูลเฉพาะคลังนั้น (DELETE WHERE) แล้วบันทึกใหม่เฉพาะคลังนั้น
+
+การลบและการบันทึกอยู่ใน Transaction เดียว ถ้าขั้นตอนไหนล้มเหลวจะ Rollback ทั้งหมด ไม่เหลือข้อมูลค้างครึ่งๆ กลางๆ และระบบจะเตรียมข้อมูลทั้งหมดในหน่วยความจำให้เสร็จก่อนเริ่มเขียนฐานข้อมูล
+
+แต่ละแถวที่บันทึกจะมีฟิลด์: `warehouse_code`, `item_id`, `month_no` (1-24), `period_year_month`, `outlier_method`, `outlier_status`, `original_demand_qty`, `cleansed_demand_qty`, `qty_reduced`, `calculated_at` (เวลา UTC)
+
+**รายละเอียดการคำนวณที่ควรรู้**
+
+- ขั้นตอนนี้ **ไม่คำนวณการตัดยอดซ้ำ** แต่เชื่อยอดสะอาดที่ได้จาก Sigma และ IQR ตรงๆ เพราะสาย `KEEP` มี `CapLimit = 0` ถ้านำไปกดยอดซ้ำจะทำให้ยอดสะอาดกลายเป็น 0 ทั้งหมด
+- `outlier_status` รายเดือนถูกกำหนดในขั้นตอนนี้เอง เดือนที่ถูกตัดยอด (`qty_reduced > 0`) เป็น `HIGH_OUTLIER` ส่วนเดือนที่ไม่ถูกตัดเป็น `NORMAL` และสาย `KEEP` เป็น `NORMAL` ทุกเดือน ส่วนค่า `LOW_OUTLIER` กับ `WARNING` ยังไม่ถูกใช้ เพราะระบบตัดเฉพาะเพดานด้านบน และสเปกยังไม่ได้ระบุเงื่อนไขของสองค่านี้
+- `period_year_month` ดึงจากตาราง `DRP_FCT_SKU_MONTHLY_DEMAND_PREP` ที่ Net Demand บันทึกไว้ โดย `month_no = 1` คือเดือนเก่าสุด และ `month_no = 24` คือเดือนล่าสุด
+- ค่าสถิติคำนวณด้วยความละเอียดเต็มแล้วปัดเศษ 4 ตำแหน่งแบบ `MidpointRounding.AwayFromZero` ตอนเก็บผลลัพธ์เท่านั้น ส่วน `CleanCv` คำนวณจาก SD ก่อนปัดเศษ
+- ยอดทุกเดือนต้องเป็นไปตาม `ยอดสะอาด + ยอดที่ตัด = ยอดเดิม` และผลรวม 24 เดือนต้องสมดุลตามนั้นด้วย
+- ค่า `Skewness`, `Kurtosis`, `JbPValue` ใน `CleansedDemandSeries` เปลี่ยนเป็นชนิดที่เป็น `null` ได้ (`decimal?`) เพื่อให้สาย KEEP จาก Gate 1 และ Gate 2 ส่งค่า `null` ได้ ไม่กระทบการทำงานของ Sigma และ IQR
+
 ## สูตรที่ใช้
 
 | สูตร | ค่าที่คำนวณ | วิธีคิด |
@@ -178,6 +234,7 @@ SKU ที่ไม่ผ่านการทดสอบ Normality (`IsNormal 
 | FM-13 | CV | `SD / AvgDemand` (ถ้า AvgDemand = 0 ให้ CV = 0) ใช้เลือกวิธี 2SIGMA หรือ 3SIGMA |
 | FM-14 | CapLimit, CleansedDemand, QtyReduced | `CapLimit = AvgDemand + ตัวคูณ × SD` (ตัวคูณ 2.0 หรือ `SIGMA_CAP_MULTIPLIER`) เดือนที่เกินเพดานถูกกดเหลือเท่า CapLimit และส่วนที่ตัดเก็บใน QtyReduced |
 | FM-15 | Q1, Q3, IQR, CapLimit, CleansedDemand, QtyReduced | Q1 และ Q3 คือเปอร์เซ็นไทล์ที่ 25% และ 75% ของยอดขาย 24 เดือนแบบ `PERCENTILE.INC`, `IQR = Q3 - Q1`, `CapLimit = Q3 + ตัวคูณ × IQR` (ตัวคูณ 1.5 หรือ 3.0) ถ้า IQR = 0 ใช้ `KEEP` ไม่ตัดยอด เดือนที่เกินเพดานถูกกดเหลือเท่า CapLimit และส่วนที่ตัดเก็บใน QtyReduced |
+| FM-16 | CleanMean, CleanSd, CleanCv, CleanActiveMonths, CleanAdi, CleanTrendR, CleanSeasonalR | คำนวณสถิติ 7 ค่าใหม่จากยอดสะอาด 24 เดือน โดยใช้สูตร FM-04 ถึง FM-09 และ FM-13 ชุดเดิม พร้อมเงื่อนไขป้องกันค่าเป็น 0 และสร้างแถวประวัติรายเดือน `ยอดสะอาด + ยอดที่ตัด = ยอดเดิม` |
 
 FM-08 และ FM-09 ใช้สูตรสหสัมพันธ์เพียร์สันตัวเดียวกัน (`Correl(X, Y)`) คำนวณด้วย `double` เต็มความละเอียดแบบ Excel แล้วค่อยปัดเศษ 4 ตำแหน่งตอนเก็บผลลัพธ์สุดท้าย
 
@@ -185,18 +242,21 @@ FM-08 และ FM-09 ใช้สูตรสหสัมพันธ์เพ�
 
 | ไฟล์ | หน้าที่ |
 |---|---|
-| `Program.cs` | จุดเริ่มโปรแกรม อ่าน Argument เชื่อมต่อฐานข้อมูล สั่งรันทีละขั้น (NetDemand → Cleansing → Normality → Sigma Capping → IQR Capping) โหลดเกณฑ์จาก `M_LOV` และข้อมูลยอดขาย แล้วแสดงผลสรุป |
+| `Program.cs` | จุดเริ่มโปรแกรม อ่าน Argument เชื่อมต่อฐานข้อมูล สั่งรันทีละขั้น (NetDemand → Cleansing → Normality → Sigma Capping → IQR Capping → Finalize) โหลดเกณฑ์จาก `M_LOV` และข้อมูลยอดขาย แล้วแสดงผลสรุป |
 | `src/NetDemand/` | คำนวณ Net Demand (FM-01, FM-02) และบันทึก Snapshot ลง `DRP_FCT_SKU_MONTHLY_DEMAND_PREP` |
 | `src/Cleansing/CleansingEngine.cs` | สูตร FM-03 ถึง FM-09 และการตัดสิน KEEP / PENDING ของทั้ง Gate 1 และ Gate 2 (ไม่ยุ่งกับฐานข้อมูล) |
 | `src/Cleansing/NormalityEngine.cs` | สูตร FM-10 ถึง FM-12 กฎ Triple Gate และการแยกสาย Sigma / IQR (ไม่ยุ่งกับฐานข้อมูล) |
 | `src/Cleansing/SigmaCappingEngine.cs` | สูตร FM-13 ถึง FM-14 การเลือก 2SIGMA / 3SIGMA และการตัดยอดรายเดือนของสายปกติ (ไม่ยุ่งกับฐานข้อมูล) |
 | `src/Cleansing/IqrCappingEngine.cs` | สูตร FM-15 การหา Q1/Q3 แบบ `PERCENTILE.INC` การเลือก KEEP / 1.5IQR / 3.0IQR และการตัดยอดรายเดือนของสายไม่ปกติ ใช้ `CleansedDemandSeries` ที่ประกาศไว้ใน `SigmaCappingEngine.cs` ร่วมกัน (ไม่ยุ่งกับฐานข้อมูล) |
+| `src/Cleansing/CleansedDatasetFinalizeEngine.cs` | PBI-08 (FM-16) รวมสายข้อมูลทั้ง 3 สาย แปลงสาย KEEP จาก Gate 1/2 ให้อยู่ในรูปแบบเดียวกัน คำนวณสถิติสะอาด 7 ค่า สร้าง `CleansedSkuDemandDto` และแถวประวัติรายเดือน 24 แถวต่อ SKU (ไม่ยุ่งกับฐานข้อมูล) |
+| `src/Cleansing/OutlierCleansingRepository.cs` | PBI-08 ส่วนที่คุยกับฐานข้อมูลอย่างเดียว คือโหลดรหัสงวดปฏิทิน 24 เดือน และบันทึกประวัติลง `DRP_FCT_SKU_OUTLIER_CLEANSING` ใน Transaction เดียว |
 | `Tests/NetDemandTests.cs` | Unit Test ของ Net Demand ทั้ง 12 เคส (TC-02-01 ถึง TC-02-12) ตามที่ระบุใน Jira |
 | `Tests/Gate1.cs` | Unit Test ของ Keep Gate 1 ทั้ง 12 เคส (TC-03-01 ถึง TC-03-12) ตามที่ระบุใน Jira |
 | `Tests/Gate2.cs` | Unit Test ของ Keep Gate 2 ทั้ง 12 เคส (TC-04-01 ถึง TC-04-12) ตามที่ระบุใน Jira |
 | `Tests/NormalityTests.cs` | Unit Test ของ Normality Testing ทั้ง 10 เคส (TC-05-01 ถึง TC-05-10) ตามที่ระบุใน Jira เทียบผลด้วยความคลาดเคลื่อนไม่เกิน 0.0001 |
 | `Tests/SigmaCappingTests.cs` | Unit Test ของ Sigma Capping ทั้ง 8 เคส (TC-06-01 ถึง TC-06-08) ตามที่ระบุใน Jira |
 | `Tests/IqrCappingTests.cs` | Unit Test ของ IQR Capping ทั้ง 8 เคส (TC-07-01 ถึง TC-07-08) ตามที่ระบุใน Jira |
+| `Tests/FinalizeTests.cs` | Unit Test ของ PBI-08 ทั้ง 9 เคส (TC-08-01 ถึง TC-08-08 และ TC-08-10) ตามที่ระบุใน Jira ส่วน TC-08-09 ต้องทดสอบกับฐานข้อมูลจริง |
 
 ## ข้อมูลที่ใช้
 
@@ -204,6 +264,7 @@ FM-08 และ FM-09 ใช้สูตรสหสัมพันธ์เพ�
 
 - `AxWebReport_UAT.dbo.DRP_STG_DRP_DEMAND_24M` ตาราง Staging เก็บยอดขายดิบ (`raw_sales_qty`) และยอดเสียโอกาส (`oos_lost_qty`) รายเดือน เป็นต้นทางของ Net Demand
 - `AxWebReport_UAT.dbo.DRP_FCT_SKU_MONTHLY_DEMAND_PREP` ตารางที่ Net Demand บันทึกผล Snapshot รายงวด และเป็นต้นทางของ Cleansing (`net_demand_qty`, `month_no` 1 ถึง 24) ถ้าเดือนไหนไม่มีข้อมูล จะนับเป็น 0
+- `AxWebReport_UAT.dbo.DRP_FCT_SKU_OUTLIER_CLEANSING` ตารางปลายทางของ PBI-08 เก็บประวัติการตัดยอดรายเดือน 24 แถวต่อ SKU (Primary Key คือ `warehouse_code`, `item_id`, `month_no`) ตารางนี้ต้องมีอยู่ในฐานข้อมูลก่อนรัน
 
 **ค่าเกณฑ์จาก `AxWebReport_UAT.dbo.M_LOV`** (`LOV_CODE_1 = 'DRP_CONFIG'`) ถ้าไม่พบค่าหรือแปลงค่าไม่ได้ จะใช้ค่าเริ่มต้นและแสดงคำเตือน `[WARN]`
 
@@ -231,7 +292,7 @@ FM-08 และ FM-09 ใช้สูตรสหสัมพันธ์เพ�
 ## วิธีรัน
 
 ```bash
-# รันงานจริง (ต่อฐานข้อมูล): NetDemand → Gate 1 → Gate 2 → Normality Testing → Sigma Capping → IQR Capping
+# รันงานจริง (ต่อฐานข้อมูล): NetDemand → Gate 1 → Gate 2 → Normality Testing → Sigma Capping → IQR Capping → Finalize
 # ทุกคลัง ด้วยงวดล่าสุดที่มีในระบบ
 dotnet run
 
@@ -242,13 +303,13 @@ dotnet run -- --period 202609 --warehouse CMPOS
 | พารามิเตอร์ | บังคับ? | ความหมาย |
 |---|---|---|
 | `--period` | ไม่ | งวดเดือนเป้าหมาย (yyyyMM เช่น 202609) ใช้กับขั้น Net Demand ถ้าไม่ระบุ ใช้งวดล่าสุดที่มีในฐานข้อมูล ถ้ารูปแบบผิดโปรแกรมจะแจ้งและจบทันที |
-| `--warehouse` | ไม่ | รหัสคลังที่ต้องการรันเฉพาะเจาะจง ใช้กับทั้ง Net Demand และ Cleansing ถ้าไม่ระบุ รันครบทั้ง 7 คลัง |
+| `--warehouse` | ไม่ | รหัสคลังที่ต้องการรันเฉพาะเจาะจง ใช้กับ Net Demand, Cleansing และการบันทึกของ PBI-08 ถ้าไม่ระบุ รันครบทั้ง 7 คลัง |
 
-> ก่อนรันแบบเจาะจงคลัง อ่านหัวข้อ **Idempotency** ของ Net Demand ด้านบนก่อน
+> ก่อนรันแบบเจาะจงคลัง อ่านหัวข้อ **Idempotency** ของ Net Demand และของ PBI-08 ด้านบนก่อน
 
 หลังรันงานจริงเสร็จ โปรแกรมจะรอให้กดปุ่มใดก็ได้ก่อนปิด ถ้าจะตั้งเวลารันอัตโนมัติ (เช่น scheduler) ควรเอา `Console.ReadKey()` ออกจาก `Program.cs`
 
-การรันงานจริงจะแสดงจำนวน KEEP / PENDING แยกตามเหตุผลและตามคลัง (รวมผลของทั้งสอง Gate) ตามด้วยสรุป Normality Testing คือจำนวน SKU ที่เป็น Normal (ไป PBI-06) และ Non-normal (ไป PBI-07) พร้อมแยกตามคลัง สรุป Sigma Capping คือจำนวน SKU ที่ใช้ 2SIGMA / 3SIGMA, จำนวน SKU ที่มียอดถูกตัด และยอดรวมที่ถูกตัดทอน พร้อมแยกตามคลัง และสรุป IQR Capping คือจำนวน SKU ที่ใช้ 1.5IQR / 3.0IQR / KEEP, จำนวน SKU ที่มียอดถูกตัด และยอดรวมที่ถูกตัดทอน พร้อมแยกตามคลัง
+การรันงานจริงจะแสดงจำนวน KEEP / PENDING แยกตามเหตุผลและตามคลัง (รวมผลของทั้งสอง Gate) ตามด้วยสรุป Normality Testing คือจำนวน SKU ที่เป็น Normal (ไป PBI-06) และ Non-normal (ไป PBI-07) พร้อมแยกตามคลัง สรุป Sigma Capping คือจำนวน SKU ที่ใช้ 2SIGMA / 3SIGMA, จำนวน SKU ที่มียอดถูกตัด และยอดรวมที่ถูกตัดทอน พร้อมแยกตามคลัง และสรุป IQR Capping คือจำนวน SKU ที่ใช้ 1.5IQR / 3.0IQR / KEEP, จำนวน SKU ที่มียอดถูกตัด และยอดรวมที่ถูกตัดทอน พร้อมแยกตามคลัง และปิดท้ายด้วยสรุป Finalize คือจำนวน SKU ทั้งหมดที่รวมเข้ามา จำนวนแถวที่บันทึกลงตาราง จำนวนเดือนที่ถูกตัดยอด (`HIGH_OUTLIER`) และจำนวน SKU แยกตามวิธีคลีนซิ่ง
 
 ## Unit Test (ไม่ต่อฐานข้อมูล)
 
@@ -272,9 +333,14 @@ dotnet run -- --test-sigma
 
 # IQR Capping
 dotnet run -- --test-iqr
+
+# Finalize
+dotnet run -- --test-finalize
 ```
 
 ทุกชุดแสดงผลในรูปแบบเดียวกัน คือทุกเคสแสดง Input ที่ส่งเข้าไป, ค่า Expected (คำตอบที่ควรได้ตามสเปก) และค่า Actual (ผลจริงจากการรันฟังก์ชัน) ให้เทียบกันตรงๆ ปิดท้ายด้วยสรุป PASS / FAIL ถ้าแถวไหนขึ้น `FAIL` แปลว่าค่าคำนวณไม่ตรงสเปก ต้องตรวจสอบ Logic ก่อนนำไปใช้งานจริง
+
+หมายเหตุ: เคส TC-08-09 (รันซ้ำเฉพาะคลังและ Rollback เมื่อเกิดข้อผิดพลาด) เป็นการทดสอบพฤติกรรมของฐานข้อมูล จึงไม่อยู่ในชุด Unit Test นี้ ต้องทดสอบกับฐานข้อมูลทดสอบ โดยนับจำนวนแถวแยกตามคลังก่อนและหลังรัน
 
 
 ## ผลลัพธ์
@@ -290,4 +356,6 @@ dotnet run -- --test-iqr
 
 **จาก IQR Capping:** เฉพาะ SKU สาย Non-normal จะได้ผลลัพธ์เป็น `CleansedDemandSeries` โครงสร้างเดียวกับ Sigma Capping ต่างกันที่ `CleansingMethod` ซึ่งเป็น `1.5IQR`, `3.0IQR` หรือ `KEEP` (กรณี `KEEP` ค่า `CapLimit` เป็น 0.0000 และ `CleansedDemand24M` เท่ากับยอดเดิมทุกงวด) พร้อม Metadata ที่ส่งต่อมาจาก Normality ครบเช่นกัน เก็บในหน่วยความจำเตรียมส่งต่อให้ PBI-08
 
-> ขอบเขตของงานนี้ครอบคลุมถึง Net Demand, การคัดกรอง Gate 1, Gate 2, การทดสอบ Normality (PBI-05), การตัดยอดแบบ Sigma Capping (PBI-06) และการตัดยอดแบบ IQR Capping (PBI-07) เท่านั้น ส่วนการบันทึกลงตารางสะอาด (PBI-08) ยังไม่ได้ทำในโปรเจกต์นี้ ผลของ Sigma Capping และ IQR Capping จึงยังอยู่ในหน่วยความจำและยังไม่ถูกส่งต่อหรือบันทึกที่ไหน
+**จาก Finalize (PBI-08):** ได้ 2 ผลลัพธ์ ผลแรกคือประวัติการตัดยอดรายเดือน บันทึกลง `DRP_FCT_SKU_OUTLIER_CLEANSING` (24 แถวต่อ SKU) ผลที่สองคือ `CleansedSkuDemandDto` ต่อ SKU เก็บในหน่วยความจำ ประกอบด้วย `WarehouseCode`, `ItemId`, `CleansedDemand24M`, สถิติสะอาด 7 ค่า (`CleanMean`, `CleanSd`, `CleanCv`, `CleanActiveMonths`, `CleanAdi`, `CleanTrendR`, `CleanSeasonalR`), `HistoryMonths`, `OutlierMethod` และ `Skewness`, `Kurtosis`, `JbPValue` (เป็น `null` สำหรับสาย KEEP จาก Gate 1 และ Gate 2) เตรียมส่งต่อให้ขั้นตอนเลือกโมเดลพยากรณ์ใน Stage 1.2 (PBI-09 ถึง PBI-12)
+
+> ขอบเขตของงานนี้ครอบคลุมถึง Net Demand, การคัดกรอง Gate 1, Gate 2, การทดสอบ Normality (PBI-05), การตัดยอดแบบ Sigma Capping (PBI-06), การตัดยอดแบบ IQR Capping (PBI-07) และการสรุปชุดข้อมูลสะอาดพร้อมบันทึกประวัติ (PBI-08) ส่วนการนำ `CleansedSkuDemandDto` ไปเลือกโมเดลพยากรณ์ (PBI-09 ถึง PBI-12) ยังไม่ได้ทำในโปรเจกต์นี้
