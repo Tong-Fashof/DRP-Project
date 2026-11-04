@@ -66,7 +66,7 @@
 
             var dtos = new List<CleansedSkuDemandDto>(all.Count);
             var rows = new List<SkuOutlierCleansingRow>(all.Count * 24);
-            var calculatedAt = DateTime.UtcNow;   // ใช้เวลาเดียวกันทั้ง Batch
+            var calculatedAt = DateTime.Now;
 
             foreach (var s in all)
             {

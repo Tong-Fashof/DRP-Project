@@ -110,7 +110,7 @@ namespace DRP_Project.Tests
                 // สร้าง series จำลอง แล้วเรียก Engine ของ PBI-08 ทั้งฝั่งสถิติ (DTO) และฝั่งแถว Fact รายเดือน
                 CleansedDemandSeries series = BuildSeries(tc);
                 CleansedSkuDemandDto dto = CleansedDatasetFinalizeEngine.BuildDto(series);
-                List<SkuOutlierCleansingRow> rows = CleansedDatasetFinalizeEngine.BuildRows(series, periodMap, DateTime.UtcNow);
+                List<SkuOutlierCleansingRow> rows = CleansedDatasetFinalizeEngine.BuildRows(series, periodMap, DateTime.Now);
 
                 decimal totalOriginal = tc.Original24M.Sum();
                 decimal totalCleansed = rows.Sum(r => r.CleansedDemandQty);
