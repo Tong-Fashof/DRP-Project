@@ -25,9 +25,9 @@ namespace DRP_Project.src.Cleansing
         public int HistoryMonths { get; set; }
         public decimal AvgDemand { get; set; }
         public decimal Sd { get; set; }
-        public decimal Skewness { get; set; }
-        public decimal Kurtosis { get; set; }
-        public decimal JbPValue { get; set; }
+        public decimal? Skewness { get; set; }   // PBI-08: null สำหรับสาย KEEP จาก Gate 1/2 (ข้าม Normality Test)
+        public decimal? Kurtosis { get; set; }
+        public decimal? JbPValue { get; set; }
     }
 
     public static class SigmaCappingEngine

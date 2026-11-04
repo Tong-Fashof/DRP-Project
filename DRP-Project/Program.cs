@@ -15,13 +15,14 @@ namespace DRP_Project
         static void Main(string[] args)
         {
             // โหมด Unit Test: ตรวจก่อนต่อฐานข้อมูล แล้วจบโปรแกรมทันที
-            // รัน Unit Test (ไม่ต่อฐานข้อมูล): --test-netdemand | --test-gate1 | --test-gate2 | --test-normality | --test-sigma | --test-iqr
+            // รัน Unit Test (ไม่ต่อฐานข้อมูล): --test-netdemand | --test-gate1 | --test-gate2 | --test-normality | --test-sigma | --test-iqr | --test-finalize
             if (args.Contains("--test-netdemand")) { NetDemandTests.RunUnitTests(); return; }
             if (args.Contains("--test-gate1")) { Gate1.RunUnitTests(); return; }
             if (args.Contains("--test-gate2")) { Gate2.RunUnitTests(); return; }
             if (args.Contains("--test-normality")) { NormalityTests.RunUnitTests(); return; }
             if (args.Contains("--test-sigma")) { SigmaCappingTests.RunUnitTests(); return; }
             if (args.Contains("--test-iqr")) { IqrCappingTests.RunUnitTests(); return; }
+            if (args.Contains("--test-finalize")) { FinalizeTests.RunUnitTests(); return; }
 
             if (!TryParseArgs(args)) return;   // Argument ผิดรูปแบบ -> จบโปรแกรม
 
@@ -53,7 +54,10 @@ namespace DRP_Project
                 // เฉพาะสาย Non-normal: ตัดยอดส่วนเกินด้วย 1.5IQR / 3.0IQR (หรือ KEEP เมื่อ IQR = 0) แล้วส่งต่อ PBI-08
                 List<CleansedDemandSeries> cleansedIqr = RunIqrCapping(connection, nonNormal);
 
-                Console.ReadKey();
+                // ===== STEP 6: Cleansed Dataset Finalize (PBI-08) =====
+                // รวม KEEP (Gate 1/2) + Sigma (PBI-06) + IQR (PBI-07) -> คำนวณสถิติสะอาดใหม่
+                // บันทึกประวัติรายเดือนลง DRP_FCT_SKU_OUTLIER_CLEANSING แล้วส่ง DTO ต่อให้ Stage 1.2 (PBI-09 ถึง PBI-12)
+                List<CleansedSkuDemandDto> cleansedSkuDtos = RunFinalize(connection, candidates, cleansed, cleansedIqr);
             }
             catch (Exception ex)
             {
@@ -226,7 +230,6 @@ namespace DRP_Project
                     map[key] = new SkuCleansingCandidate { warehouse_code = warehouse_code, item_id = item_id };
                 }
 
-
                 // ยอดความต้องการแท้จริง 24 เดือนและการประกอบอาเรย์(Array Population): ดึงชุดข้อมูล net_demand_qty เรียงตาม month_no(1..24) รายคลังและราย SKU จากตาราง DRP_FCT_SKU_MONTHLY_DEMAND_PREP 
                 // โดยสร้างอาเรย์ decimal[24] กำหนดค่าเริ่มต้นเป็น 0.0000m ทั้งหมด แล้วแมปข้อมูลตามตำแหน่ง Demand24M[month_no - 1] = net_demand_qty เพื่อให้มั่นใจว่าอาเรย์มีขนาด 24 งวดสมบูรณ์ 100 % แม้บางงวดจะไม่มีข้อมูลในฐานข้อมูล
 
@@ -348,6 +351,29 @@ namespace DRP_Project
             }
 
             return cleansed;
+        }
+
+        // ======================================================
+        // PBI-08: รวม KEEP (Gate 1/2) + Sigma (PBI-06) + IQR (PBI-07) -> คำนวณสถิติสะอาดใหม่ 7 ค่า
+        // -> บันทึกลง DRP_FCT_SKU_OUTLIER_CLEANSING แล้วคืน List<CleansedSkuDemandDto> ส่งต่อ Stage 1.2 (PBI-09 ถึง PBI-12)
+        // ======================================================
+        static List<CleansedSkuDemandDto> RunFinalize(SqlConnection connection,List<SkuCleansingCandidate> candidates,List<CleansedDemandSeries> cleansed,List<CleansedDemandSeries> cleansedIqr)
+        {
+            Dictionary<int, string> periodMap = OutlierCleansingRepository.LoadPeriodMap(connection, targetWarehouseCode);
+            var (dtos, rows) = CleansedDatasetFinalizeEngine.FinalizeAll(candidates, cleansed, cleansedIqr, periodMap);
+            OutlierCleansingRepository.Save(connection, rows, targetWarehouseCode);
+
+            Console.WriteLine();
+            Console.WriteLine("--- Cleansed Dataset Finalize (PBI-08) ---");
+            Console.WriteLine($"SKU ทั้งหมด (KEEP+Sigma+IQR) : {dtos.Count}");
+            Console.WriteLine($"แถว Fact บันทึก              : {rows.Count}");
+            Console.WriteLine($"HIGH_OUTLIER (เดือนที่ถูกตัด) : {rows.Count(r => r.OutlierStatus == CleansedDatasetFinalizeEngine.StatusHighOutlier)}");
+            foreach (var g in dtos.GroupBy(d => d.OutlierMethod).OrderByDescending(g => g.Count()))
+            {
+                Console.WriteLine($"{g.Key,-10} {g.Count(),8:N0}");
+            }
+
+            return dtos;
         }
     }
 }
