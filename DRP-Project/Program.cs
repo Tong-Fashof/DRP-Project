@@ -364,10 +364,16 @@ namespace DRP_Project
             OutlierCleansingRepository.Save(connection, rows, targetWarehouseCode);
 
             Console.WriteLine();
-            Console.WriteLine("--- Cleansed Dataset Finalize (PBI-08) ---");
+            Console.WriteLine("--- Cleansed Dataset Finalize ---");
             Console.WriteLine($"SKU ทั้งหมด (KEEP+Sigma+IQR) : {dtos.Count}");
             Console.WriteLine($"แถว Fact บันทึก              : {rows.Count}");
             Console.WriteLine($"HIGH_OUTLIER (เดือนที่ถูกตัด) : {rows.Count(r => r.OutlierStatus == CleansedDatasetFinalizeEngine.StatusHighOutlier)}");
+
+            // KEEP     ไม่ตัดยอดเลย - เก็บยอดเดิมทั้งหมด ข้อมูลไม่พอหรือไม่ควรตัด(ดูด้านล่าง)
+            // 2SIGMA   ตัดแบบเข้มปานกลาง - ยอดแจกแจงปกติ และผันผวนต่ำ(CV ≤ 0.5)
+            // 3SIGMA   ตัดแบบผ่อนปรน - ยอดแจกแจงปกติ แต่ผันผวนสูง(CV > 0.5)
+            // 1.5IQR   ตัดสำหรับยอดไม่ปกติที่เหวี่ยงปานกลาง - ยอดไม่ปกติ และความเบ้/ ความโด่งไม่เกินเกณฑ์
+            // 3.0IQR   ตัดสำหรับยอดไม่ปกติที่เหวี่ยงรุนแรง - ยอดไม่ปกติ และความเบ้หรือความโด่งเกินเกณฑ์
             foreach (var g in dtos.GroupBy(d => d.OutlierMethod).OrderByDescending(g => g.Count()))
             {
                 Console.WriteLine($"{g.Key,-10} {g.Count(),8:N0}");
