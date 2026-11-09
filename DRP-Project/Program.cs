@@ -1,4 +1,5 @@
 ﻿using DRP_Project.src.Cleansing;
+using DRP_Project.src.ModelRouting;
 using DRP_Project.src.NetDemand;
 using DRP_Project.Tests;
 using Microsoft.Data.SqlClient;
@@ -12,7 +13,7 @@ namespace DRP_Project
 {
     // ======================================================================
     // DRP Outlier Cleansing Engine: จุดเริ่มต้นของโปรแกรม (Console App)
-    // ลำดับ: ต่อ DB -> STEP 1 NetDemand -> STEP 2 Gate 1/2 -> STEP 3 Normality -> STEP 4 Sigma -> STEP 5 IQR -> STEP 6 Finalize
+    // ลำดับ: ต่อ DB -> STEP 1 NetDemand -> STEP 2 Gate 1/2 -> STEP 3 Normality -> STEP 4 Sigma -> STEP 5 IQR -> STEP 6 Finalize -> STEP 7 Priority Chain Step 1 & 2
     // Argument: --warehouse <รหัสคลัง> (ไม่ใส่ = ทุกคลัง) | --period <yyyyMM> (ไม่ใส่ = งวดล่าสุดใน Staging)
     // Program.cs ควบคุมลำดับขั้นตอนเท่านั้น: สูตรอยู่ใน Engine | งาน SQL อยู่ใน Repository / NetDemandPreprocessor | สรุปผลหน้าจออยู่ใน CleansingPipeline
     // Log: Console + ไฟล์ logs/drp-yyyyMMdd.log | Exit Code: 0 = สำเร็จ, 1 = Argument ผิด, 2 = ประมวลผลล้มเหลว
@@ -32,7 +33,7 @@ namespace DRP_Project
         static int Main(string[] args)
         {
             // โหมด Unit Test: ตรวจก่อนต่อฐานข้อมูล แล้วจบโปรแกรมทันที (ใช้ Console ล้วน ไม่เปิด Logger)
-            // รัน Unit Test (ไม่ต่อฐานข้อมูล): --test-netdemand | --test-gate1 | --test-gate2 | --test-normality | --test-sigma | --test-iqr | --test-finalize
+            // รัน Unit Test (ไม่ต่อฐานข้อมูล): --test-netdemand | --test-gate1 | --test-gate2 | --test-normality | --test-sigma | --test-iqr | --test-finalize | --test-priority-step12
             if (args.Contains("--test-netdemand")) { NetDemandTests.RunUnitTests(); return ExitSuccess; }
             if (args.Contains("--test-gate1")) { Gate1.RunUnitTests(); return ExitSuccess; }
             if (args.Contains("--test-gate2")) { Gate2.RunUnitTests(); return ExitSuccess; }
@@ -40,6 +41,7 @@ namespace DRP_Project
             if (args.Contains("--test-sigma")) { SigmaCappingTests.RunUnitTests(); return ExitSuccess; }
             if (args.Contains("--test-iqr")) { IqrCappingTests.RunUnitTests(); return ExitSuccess; }
             if (args.Contains("--test-finalize")) { FinalizeTests.RunUnitTests(); return ExitSuccess; }
+            if (args.Contains("--test-model-12")) { ModelStep12Tests.RunUnitTests(); return ExitSuccess; }
 
             // เปิด Logger หลังตรวจโหมด Test เพราะโหมด Test ใช้ Console ล้วนและไม่ต่อฐานข้อมูล
             InitLogger();
@@ -93,8 +95,15 @@ namespace DRP_Project
                 // บันทึกประวัติรายเดือนลง DRP_FCT_SKU_OUTLIER_CLEANSING แล้วส่ง DTO ต่อให้ Stage 1.2 (PBI-09 ถึง PBI-12)
                 currentStep = "STEP 6: Cleansed Dataset Finalize";
                 Log.Information(">>> {Step}", currentStep);
-                // DTO ผลลัพธ์สุดท้ายของ Stage 1.1 | ยังไม่มี Stage 1.2 มารับต่อ จึงเก็บไว้ในตัวแปรก่อน
+                // DTO ผลลัพธ์สุดท้ายของ Stage 1.1 | ส่งต่อให้ STEP 7 (Stage 1.2: PBI-09)
                 List<CleansedSkuDemandDto> cleansedSkuDtos = CleansingPipeline.RunFinalize(connection, targetWarehouseCode, candidates, cleansed, cleansedIqr);
+
+                // ===== STEP 7: Priority Chain Step 1 & 2 (PBI-09) =====
+                // ดักสินค้าไม่เคยขาย (1.7 No Sales) และไม่มียอดขาย 3 เดือนล่าสุด (1.6 No Sales L3M) แล้วส่งต่อ State ครบทุก SKU
+                currentStep = "STEP 7: Priority Chain Step 1 & 2";
+                Log.Information(">>> {Step}", currentStep);
+                // State ผลลัพธ์ | ยังไม่มี PBI-10 มารับต่อ จึงเก็บไว้ในตัวแปรก่อน
+                List<SkuModelRoutingState> routingStates = ModelRoutingPipeline.RunPriorityChainStep12(cleansedSkuDtos);
 
                 Log.Information("ประมวลผลเสร็จสิ้น ใช้เวลา {Seconds:N1} วินาที", stopwatch.Elapsed.TotalSeconds);
                 return ExitSuccess;

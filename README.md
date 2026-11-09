@@ -1,6 +1,6 @@
 # DRP_Project
 
-Console App ของระบบ DRP สำหรับเตรียมข้อมูลยอดขายและตัดยอด Outlier รันต่อเนื่องในโปรแกรมเดียว 6 ขั้นตอน
+Console App ของระบบ DRP สำหรับเตรียมข้อมูลยอดขายและตัดยอด Outlier รันต่อเนื่องในโปรแกรมเดียว 7 ขั้นตอน
 
 1. **Net Demand Preprocessing** คำนวณยอดความต้องการขายที่แท้จริง (True Demand) รายเดือนของแต่ละ SKU ในแต่ละคลัง
 2. **Cleansing (Keep Gate 1 และ Gate 2)** คัดกรองสินค้าที่ไม่ควรถูกตัดยอดขาย
@@ -8,8 +8,9 @@ Console App ของระบบ DRP สำหรับเตรียมข้
 4. **Sigma Capping** ตัดยอดขายเดือนที่พุ่งสูงผิดปกติของสินค้าสายปกติ ด้วยเพดาน 2-Sigma หรือ 3-Sigma
 5. **IQR Capping** ตัดยอดขายเดือนที่พุ่งสูงผิดปกติของสินค้าสายไม่ปกติ (ยอดเบ้หรือเหวี่ยง) ด้วยเพดาน 1.5 IQR หรือ 3.0 IQR
 6. **Cleansed Dataset Finalize** รวมผลจากทุกสายเป็นชุดข้อมูลสะอาด 24 เดือน คำนวณสถิติใหม่จากยอดสะอาด แล้วบันทึกประวัติการตัดยอดรายเดือนลงฐานข้อมูล
+7. **Priority Chain Step 1 และ 2** ดักสินค้าที่ไม่เคยขายเลยตลอด 24 เดือน และสินค้าที่ไม่มียอดขายในช่วง 3 เดือนล่าสุด แล้วกำหนดโมเดล 1.7 หรือ 1.6 เพื่อหยุดการพยากรณ์ ไม่ให้ระบบแนะนำสั่งสินค้าตายซากเข้าคลัง
 
-อ้างอิงงาน **PBI-02** Net Demand Preprocessing, **SCRUM-14 [PBI-03]** เกณฑ์คุ้มครอง Keep Gate 1, **SCRUM-15 [PBI-04]** เกณฑ์คุ้มครอง Keep Gate 2, **SCRUM-16 [PBI-05]** ทดสอบการแจกแจงแบบปกติทางสถิติ **SCRUM-17 [PBI-06]** ตัดยอดส่วนเกินสายปกติ 2-Sigma และ 3-Sigma Capping และ **SCRUM-18 [PBI-07]** ตัดยอดส่วนเกินสายยอดเหวี่ยงไม่ปกติ 1.5 IQR และ 3.0 IQR Capping และ **SCRUM-19 [PBI-08]** สรุปชุดข้อมูลยอดขายสะอาดหลังคลีนซิ่ง 24 เดือน และการคำนวณสถิติใหม่ประจำงวด
+อ้างอิงงาน **PBI-02** Net Demand Preprocessing, **SCRUM-14 [PBI-03]** เกณฑ์คุ้มครอง Keep Gate 1, **SCRUM-15 [PBI-04]** เกณฑ์คุ้มครอง Keep Gate 2, **SCRUM-16 [PBI-05]** ทดสอบการแจกแจงแบบปกติทางสถิติ **SCRUM-17 [PBI-06]** ตัดยอดส่วนเกินสายปกติ 2-Sigma และ 3-Sigma Capping และ **SCRUM-18 [PBI-07]** ตัดยอดส่วนเกินสายยอดเหวี่ยงไม่ปกติ 1.5 IQR และ 3.0 IQR Capping และ **SCRUM-19 [PBI-08]** สรุปชุดข้อมูลยอดขายสะอาดหลังคลีนซิ่ง 24 เดือน และการคำนวณสถิติใหม่ประจำงวด และ **SCRUM-20 [PBI-09]** บันไดขั้นที่ 1 และ 2 คัดกรองสินค้าไม่เคยขาย (No Sales) และสินค้าไม่มียอดขาย 3 เดือนล่าสุด (No Sales L3M)
 
 
 ## Net Demand Preprocessing (PBI-02)
@@ -204,7 +205,7 @@ SKU ที่ไม่ผ่านการทดสอบ Normality (`IsNormal 
 
 การลบและการบันทึกอยู่ใน Transaction เดียว ถ้าขั้นตอนไหนล้มเหลวจะ Rollback ทั้งหมด ไม่เหลือข้อมูลค้างครึ่งๆ กลางๆ และระบบจะเตรียมข้อมูลทั้งหมดในหน่วยความจำให้เสร็จก่อนเริ่มเขียนฐานข้อมูล
 
-แต่ละแถวที่บันทึกจะมีฟิลด์: `warehouse_code`, `item_id`, `month_no` (1-24), `period_year_month`, `outlier_method`, `outlier_status`, `original_demand_qty`, `cleansed_demand_qty`, `qty_reduced`, `calculated_at` (เวลา UTC)
+แต่ละแถวที่บันทึกจะมีฟิลด์: `warehouse_code`, `item_id`, `month_no` (1-24), `period_year_month`, `outlier_method`, `outlier_status`, `original_demand_qty`, `cleansed_demand_qty`, `qty_reduced`, `calculated_at` (เวลาเครื่องที่รัน)
 
 **รายละเอียดการคำนวณที่ควรรู้**
 
@@ -214,6 +215,35 @@ SKU ที่ไม่ผ่านการทดสอบ Normality (`IsNormal 
 - ค่าสถิติคำนวณด้วยความละเอียดเต็มแล้วปัดเศษ 4 ตำแหน่งแบบ `MidpointRounding.AwayFromZero` ตอนเก็บผลลัพธ์เท่านั้น ส่วน `CleanCv` คำนวณจาก SD ก่อนปัดเศษ
 - ยอดทุกเดือนต้องเป็นไปตาม `ยอดสะอาด + ยอดที่ตัด = ยอดเดิม` และผลรวม 24 เดือนต้องสมดุลตามนั้นด้วย
 - ค่า `Skewness`, `Kurtosis`, `JbPValue` ใน `CleansedDemandSeries` เปลี่ยนเป็นชนิดที่เป็น `null` ได้ (`decimal?`) เพื่อให้สาย KEEP จาก Gate 1 และ Gate 2 ส่งค่า `null` ได้ ไม่กระทบการทำงานของ Sigma และ IQR
+
+## คัดกรองสินค้าไม่เคยขายและไม่มียอดขาย 3 เดือนล่าสุด (Priority Chain Step 1 และ 2) (PBI-09)
+
+เป็นด่านแรกของ Stage 1.2 (การเลือกโมเดลพยากรณ์) รับชุดสถิติสะอาด `CleansedSkuDemandDto` จาก PBI-08 แล้วตรวจสินค้าทีละตัวว่า **ยังมีการเคลื่อนไหวทางธุรกิจอยู่หรือไม่** ถ้าไม่มี จะกำหนดโมเดลให้ทันทีและหยุดตรงนั้น ไม่สร้างตัวเลขพยากรณ์ต่อ เพื่อไม่ให้ระบบแนะนำสั่งสินค้าตายซาก (Dead Stock) หรือสินค้าที่เลิกขายไปแล้วเข้าคลัง ส่วนสินค้าที่ยังขายอยู่จะผ่านด่านนี้ไปโดยไม่ถูกแตะต้อง แล้วส่งต่อให้ขั้นถัดไป (PBI-10) ขั้นตอนนี้ทำในหน่วยความจำทั้งหมด ไม่อ่านค่าจาก `M_LOV` และไม่เขียนลงฐานข้อมูล
+
+**ตรวจ 2 ขั้น เรียงตามลำดับ**
+
+| ขั้น | ตรวจอะไร | โมเดลที่กำหนด | เหตุผลที่บันทึก |
+|---|---|---|---|
+| 1 | ตลอด 24 เดือนไม่เคยมียอดขายเลย (`CleanActiveMonths = 0` หรือยอดรวม 24 เดือน ≤ 0) | `1.7` No Sales | `No sales in the past 24 months (Active Months = 0)` |
+| 2 | 3 เดือนล่าสุด (M22, M23, M24) ไม่มียอดขายเลย (จำนวนเดือนที่ขายได้ = 0 หรือยอดรวม 3 เดือน ≤ 0) | `1.6` No Sales Last 3 Months (No Sales L3M) | `No sales in the last 3 consecutive months` |
+
+- สินค้าที่เข้าเงื่อนไขขั้นใดขั้นหนึ่งจะได้ `IsShortCircuited = true` แปลว่ายุติการเลือกโมเดลแล้ว ขั้นต่อๆ ไปต้องไม่เขียนทับ
+- สินค้าที่ไม่เข้าทั้งสองขั้น จะได้ `AssignedModelId`, `AssignedModelName`, `SelectionReason` เป็น `null` และ `IsShortCircuited = false` เพื่อให้ PBI-10 ตัดสินต่อ
+
+**ตัวอย่าง** ยาตัวหนึ่งขายได้เดือนละ 50 กล่องตั้งแต่เดือนที่ 1 ถึง 21 แล้วเลิกจำหน่าย เดือนที่ 22 ถึง 24 เป็น 0 ทั้งหมด ขั้น 1 ผ่านเพราะเคยขายมา 21 เดือน แต่ขั้น 2 เข้าเงื่อนไขเพราะ 3 เดือนล่าสุดไม่มียอดเลย จึงได้โมเดล `1.6` และหยุดทันที ส่วนสินค้าที่ไม่เคยขายเลยสักเดือนจะได้ `1.7` ที่ขั้น 1 และไม่ถูกเปลี่ยนเป็น `1.6` แม้จะเข้าเงื่อนไขขั้น 2 ด้วยก็ตาม
+
+**ผลลัพธ์ต่อ SKU** คือ `SkuModelRoutingState` รวม 19 พร็อพเพอร์ตี้ ประกอบด้วย 15 พร็อพเพอร์ตี้เดิมของ `CleansedSkuDemandDto` ที่ส่งต่อโดยไม่แก้ค่า และฟิลด์ใหม่อีก 4 ตัวคือ `AssignedModelId`, `AssignedModelName`, `SelectionReason`, `IsShortCircuited`
+
+**รายละเอียดการคำนวณที่ควรรู้**
+
+- ลำดับสำคัญ ต้องตรวจขั้น 1 ก่อนขั้น 2 เสมอ เพราะสินค้าที่ไม่เคยขายเลยก็เข้าเงื่อนไขขั้น 2 ด้วย ถ้าตรวจสลับกันจะได้โมเดลผิดเป็น 1.6 และเลขโมเดลสวนทางกับลำดับขั้น (ขั้น 1 ได้ 1.7 ขั้น 2 ได้ 1.6) จึงมีเคสทดสอบกันไว้
+- ส่งต่อ **ทุก SKU** ทั้งที่ถูกดักและที่ผ่านไป (Full-List Pass-Through ตามมติ DEC-PBI09-01) จำนวนที่ออกต้องเท่ากับจำนวนที่เข้า ถ้าไม่ตรงจะหยุดพร้อมแจ้ง error
+- ขั้น 1 อ่าน `CleanActiveMonths` ที่ PBI-08 คำนวณไว้แล้ว ส่วนยอดรวมรวมเองจากยอดสะอาด 24 เดือน ปกติสองเงื่อนไขนี้ให้ผลตรงกัน
+- ขั้น 2 ดูเฉพาะเดือนที่ 22, 23, 24 (ตำแหน่ง 21, 22, 23 ในอาเรย์ที่เริ่มนับจาก 0) ขายแค่เดือนที่ 22 หรือแค่เดือนที่ 24 เดือนเดียวก็ถือว่ายังขายอยู่ จึงผ่านต่อ แต่ถ้าขายล่าสุดเดือนที่ 21 ถือว่าเข้า 3 เดือนล่าสุดไม่มียอด
+- ใช้ยอดสะอาด (หลังตัด Outlier) ไม่ใช่ยอดดิบ และใช้ `decimal` เทียบกับ `0.0000`
+- สินค้าที่ไม่เคยขายเลยจะถูก Gate 1 ล็อกเป็น `KEEP` (`History < 12M`) แต่ยังไหลมาถึงขั้นตอนนี้ตามปกติ การตัดสินใจจึงดูจากยอดสะอาด ไม่ได้ดูจากค่า `OutlierMethod`
+- ถ้ายอดสะอาดไม่ครบ 24 งวด หรือเป็น `null` จะแจ้ง error ทันที
+- ผลลัพธ์ยังไม่ถูกบันทึกลงฐานข้อมูล เก็บในหน่วยความจำรอขั้นตอนถัดไป (การบันทึกลงตารางผลลัพธ์เป็นงานของ PBI-12)
 
 ## สูตรที่ใช้
 
@@ -235,6 +265,8 @@ SKU ที่ไม่ผ่านการทดสอบ Normality (`IsNormal 
 | FM-14 | CapLimit, CleansedDemand, QtyReduced | `CapLimit = AvgDemand + ตัวคูณ × SD` (ตัวคูณ 2.0 หรือ `SIGMA_CAP_MULTIPLIER`) เดือนที่เกินเพดานถูกกดเหลือเท่า CapLimit และส่วนที่ตัดเก็บใน QtyReduced |
 | FM-15 | Q1, Q3, IQR, CapLimit, CleansedDemand, QtyReduced | Q1 และ Q3 คือเปอร์เซ็นไทล์ที่ 25% และ 75% ของยอดขาย 24 เดือนแบบ `PERCENTILE.INC`, `IQR = Q3 - Q1`, `CapLimit = Q3 + ตัวคูณ × IQR` (ตัวคูณ 1.5 หรือ 3.0) ถ้า IQR = 0 ใช้ `KEEP` ไม่ตัดยอด เดือนที่เกินเพดานถูกกดเหลือเท่า CapLimit และส่วนที่ตัดเก็บใน QtyReduced |
 | FM-16 | CleanMean, CleanSd, CleanCv, CleanActiveMonths, CleanAdi, CleanTrendR, CleanSeasonalR | คำนวณสถิติ 7 ค่าใหม่จากยอดสะอาด 24 เดือน โดยใช้สูตร FM-04 ถึง FM-09 และ FM-13 ชุดเดิม พร้อมเงื่อนไขป้องกันค่าเป็น 0 และสร้างแถวประวัติรายเดือน `ยอดสะอาด + ยอดที่ตัด = ยอดเดิม` |
+| — (Step 1) | clean_active_months, sum_demand_24m | PBI-09 Step 1: ถ้า `clean_active_months = 0` หรือ `sum_demand_24m ≤ 0` กำหนดโมเดล 1.7 No Sales และหยุดทันที |
+| FM-17 | sum_l3m, active_l3m | PBI-09 Step 2: รวมยอดสะอาดเดือนที่ 22 ถึง 24 และนับเดือนที่ยอด > 0 ถ้า `active_l3m = 0` หรือ `sum_l3m ≤ 0` กำหนดโมเดล 1.6 No Sales L3M และหยุดทันที |
 
 FM-08 และ FM-09 ใช้สูตรสหสัมพันธ์เพียร์สันตัวเดียวกัน (`Correl(X, Y)`) คำนวณด้วย `double` เต็มความละเอียดแบบ Excel แล้วค่อยปัดเศษ 4 ตำแหน่งตอนเก็บผลลัพธ์สุดท้าย
 
@@ -242,14 +274,17 @@ FM-08 และ FM-09 ใช้สูตรสหสัมพันธ์เพ�
 
 | ไฟล์ | หน้าที่ |
 |---|---|
-| `Program.cs` | จุดเริ่มโปรแกรม อ่าน Argument เชื่อมต่อฐานข้อมูล สั่งรันทีละขั้น (NetDemand → Cleansing → Normality → Sigma Capping → IQR Capping → Finalize) โหลดเกณฑ์จาก `M_LOV` และข้อมูลยอดขาย แล้วแสดงผลสรุป |
+| `Program.cs` | จุดเริ่มโปรแกรม อ่าน Argument เชื่อมต่อฐานข้อมูล สั่งรันทีละขั้น (NetDemand → Cleansing → Normality → Sigma Capping → IQR Capping → Finalize → Priority Chain Step 1 และ 2) คุมลำดับ จับ error และกำหนดรหัสออกจากโปรแกรม ส่วนรายละเอียดของแต่ละขั้นอยู่ในไฟล์ Pipeline |
 | `src/NetDemand/` | คำนวณ Net Demand (FM-01, FM-02) และบันทึก Snapshot ลง `DRP_FCT_SKU_MONTHLY_DEMAND_PREP` |
+| `src/Cleansing/CleansingPipeline.cs` | ตัวประสานงานของขั้น Cleansing ถึง Finalize (PBI-03 ถึง PBI-08) โหลดเกณฑ์จาก `M_LOV` เรียก Engine ของแต่ละขั้น แล้วแสดงผลสรุปแยกตามคลัง |
 | `src/Cleansing/CleansingEngine.cs` | สูตร FM-03 ถึง FM-09 และการตัดสิน KEEP / PENDING ของทั้ง Gate 1 และ Gate 2 (ไม่ยุ่งกับฐานข้อมูล) |
 | `src/Cleansing/NormalityEngine.cs` | สูตร FM-10 ถึง FM-12 กฎ Triple Gate และการแยกสาย Sigma / IQR (ไม่ยุ่งกับฐานข้อมูล) |
 | `src/Cleansing/SigmaCappingEngine.cs` | สูตร FM-13 ถึง FM-14 การเลือก 2SIGMA / 3SIGMA และการตัดยอดรายเดือนของสายปกติ (ไม่ยุ่งกับฐานข้อมูล) |
 | `src/Cleansing/IqrCappingEngine.cs` | สูตร FM-15 การหา Q1/Q3 แบบ `PERCENTILE.INC` การเลือก KEEP / 1.5IQR / 3.0IQR และการตัดยอดรายเดือนของสายไม่ปกติ ใช้ `CleansedDemandSeries` ที่ประกาศไว้ใน `SigmaCappingEngine.cs` ร่วมกัน (ไม่ยุ่งกับฐานข้อมูล) |
 | `src/Cleansing/CleansedDatasetFinalizeEngine.cs` | PBI-08 (FM-16) รวมสายข้อมูลทั้ง 3 สาย แปลงสาย KEEP จาก Gate 1/2 ให้อยู่ในรูปแบบเดียวกัน คำนวณสถิติสะอาด 7 ค่า สร้าง `CleansedSkuDemandDto` และแถวประวัติรายเดือน 24 แถวต่อ SKU (ไม่ยุ่งกับฐานข้อมูล) |
-| `src/Cleansing/OutlierCleansingRepository.cs` | PBI-08 ส่วนที่คุยกับฐานข้อมูลอย่างเดียว คือโหลดรหัสงวดปฏิทิน 24 เดือน และบันทึกประวัติลง `DRP_FCT_SKU_OUTLIER_CLEANSING` ใน Transaction เดียว |
+| `src/Cleansing/OutlierCleansingRepository.cs` | ส่วนที่คุยกับฐานข้อมูลอย่างเดียวของขั้น Cleansing ถึง Finalize คือโหลดค่าเกณฑ์จาก `M_LOV` โหลดยอดขาย 24 เดือน โหลดรหัสงวดปฏิทิน 24 เดือน และบันทึกประวัติลง `DRP_FCT_SKU_OUTLIER_CLEANSING` ใน Transaction เดียว |
+| `src/ModelRouting/PriorityChainStep12Engine.cs` | PBI-09 (FM-17) ตรวจ Step 1 (No Sales → 1.7) และ Step 2 (No Sales L3M → 1.6) สร้าง `SkuModelRoutingState` 19 พร็อพเพอร์ตี้ส่งต่อทุก SKU (ไม่ยุ่งกับฐานข้อมูล) |
+| `src/ModelRouting/ModelRoutingPipeline.cs` | PBI-09 ตัวประสานงานของ Stage 1.2 เรียก Engine แล้วแสดงผลสรุปจำนวน 1.7 / 1.6 / ส่งต่อ แยกตามคลัง |
 | `Tests/NetDemandTests.cs` | Unit Test ของ Net Demand ทั้ง 12 เคส (TC-02-01 ถึง TC-02-12) ตามที่ระบุใน Jira |
 | `Tests/Gate1.cs` | Unit Test ของ Keep Gate 1 ทั้ง 12 เคส (TC-03-01 ถึง TC-03-12) ตามที่ระบุใน Jira |
 | `Tests/Gate2.cs` | Unit Test ของ Keep Gate 2 ทั้ง 12 เคส (TC-04-01 ถึง TC-04-12) ตามที่ระบุใน Jira |
@@ -257,6 +292,7 @@ FM-08 และ FM-09 ใช้สูตรสหสัมพันธ์เพ�
 | `Tests/SigmaCappingTests.cs` | Unit Test ของ Sigma Capping ทั้ง 8 เคส (TC-06-01 ถึง TC-06-08) ตามที่ระบุใน Jira |
 | `Tests/IqrCappingTests.cs` | Unit Test ของ IQR Capping ทั้ง 8 เคส (TC-07-01 ถึง TC-07-08) ตามที่ระบุใน Jira |
 | `Tests/FinalizeTests.cs` | Unit Test ของ PBI-08 ทั้ง 9 เคส (TC-08-01 ถึง TC-08-08 และ TC-08-10) ตามที่ระบุใน Jira ส่วน TC-08-09 ต้องทดสอบกับฐานข้อมูลจริง |
+| `Tests/PriorityChainStep12Tests.cs` | Unit Test ของ PBI-09 ทั้ง 8 เคส (TC-09-01 ถึง TC-09-08) ตามที่ระบุใน Jira |
 
 ## ข้อมูลที่ใช้
 
@@ -292,7 +328,7 @@ FM-08 และ FM-09 ใช้สูตรสหสัมพันธ์เพ�
 ## วิธีรัน
 
 ```bash
-# รันงานจริง (ต่อฐานข้อมูล): NetDemand → Gate 1 → Gate 2 → Normality Testing → Sigma Capping → IQR Capping → Finalize
+# รันงานจริง (ต่อฐานข้อมูล): NetDemand → Gate 1 → Gate 2 → Normality Testing → Sigma Capping → IQR Capping → Finalize → Priority Chain Step 1 และ 2
 # ทุกคลัง ด้วยงวดล่าสุดที่มีในระบบ
 dotnet run
 
@@ -309,7 +345,7 @@ dotnet run -- --period 202609 --warehouse CMPOS
 
 หลังรันงานจริงเสร็จ โปรแกรมจะรอให้กดปุ่มใดก็ได้ก่อนปิด ถ้าจะตั้งเวลารันอัตโนมัติ (เช่น scheduler) ควรเอา `Console.ReadKey()` ออกจาก `Program.cs`
 
-การรันงานจริงจะแสดงจำนวน KEEP / PENDING แยกตามเหตุผลและตามคลัง (รวมผลของทั้งสอง Gate) ตามด้วยสรุป Normality Testing คือจำนวน SKU ที่เป็น Normal (ไป PBI-06) และ Non-normal (ไป PBI-07) พร้อมแยกตามคลัง สรุป Sigma Capping คือจำนวน SKU ที่ใช้ 2SIGMA / 3SIGMA, จำนวน SKU ที่มียอดถูกตัด และยอดรวมที่ถูกตัดทอน พร้อมแยกตามคลัง และสรุป IQR Capping คือจำนวน SKU ที่ใช้ 1.5IQR / 3.0IQR / KEEP, จำนวน SKU ที่มียอดถูกตัด และยอดรวมที่ถูกตัดทอน พร้อมแยกตามคลัง และปิดท้ายด้วยสรุป Finalize คือจำนวน SKU ทั้งหมดที่รวมเข้ามา จำนวนแถวที่บันทึกลงตาราง จำนวนเดือนที่ถูกตัดยอด (`HIGH_OUTLIER`) และจำนวน SKU แยกตามวิธีคลีนซิ่ง
+การรันงานจริงจะแสดงจำนวน KEEP / PENDING แยกตามเหตุผลและตามคลัง (รวมผลของทั้งสอง Gate) ตามด้วยสรุป Normality Testing คือจำนวน SKU ที่เป็น Normal (ไป PBI-06) และ Non-normal (ไป PBI-07) พร้อมแยกตามคลัง สรุป Sigma Capping คือจำนวน SKU ที่ใช้ 2SIGMA / 3SIGMA, จำนวน SKU ที่มียอดถูกตัด และยอดรวมที่ถูกตัดทอน พร้อมแยกตามคลัง และสรุป IQR Capping คือจำนวน SKU ที่ใช้ 1.5IQR / 3.0IQR / KEEP, จำนวน SKU ที่มียอดถูกตัด และยอดรวมที่ถูกตัดทอน พร้อมแยกตามคลัง และปิดท้ายด้วยสรุป Finalize คือจำนวน SKU ทั้งหมดที่รวมเข้ามา จำนวนแถวที่บันทึกลงตาราง จำนวนเดือนที่ถูกตัดยอด (`HIGH_OUTLIER`) และจำนวน SKU แยกตามวิธีคลีนซิ่ง จากนั้นปิดท้ายด้วยสรุป Priority Chain Step 1 และ 2 คือจำนวน SKU ที่ได้โมเดล 1.7 (No Sales), 1.6 (No Sales L3M) และที่ส่งต่อให้ PBI-10 พร้อมแยกตามคลัง
 
 ## Unit Test (ไม่ต่อฐานข้อมูล)
 
@@ -336,6 +372,9 @@ dotnet run -- --test-iqr
 
 # Finalize
 dotnet run -- --test-finalize
+
+# Priority Chain Step 1 และ 2
+dotnet run -- --test-priority-step12
 ```
 
 ทุกชุดแสดงผลในรูปแบบเดียวกัน คือทุกเคสแสดง Input ที่ส่งเข้าไป, ค่า Expected (คำตอบที่ควรได้ตามสเปก) และค่า Actual (ผลจริงจากการรันฟังก์ชัน) ให้เทียบกันตรงๆ ปิดท้ายด้วยสรุป PASS / FAIL ถ้าแถวไหนขึ้น `FAIL` แปลว่าค่าคำนวณไม่ตรงสเปก ต้องตรวจสอบ Logic ก่อนนำไปใช้งานจริง
@@ -358,4 +397,6 @@ dotnet run -- --test-finalize
 
 **จาก Finalize (PBI-08):** ได้ 2 ผลลัพธ์ ผลแรกคือประวัติการตัดยอดรายเดือน บันทึกลง `DRP_FCT_SKU_OUTLIER_CLEANSING` (24 แถวต่อ SKU) ผลที่สองคือ `CleansedSkuDemandDto` ต่อ SKU เก็บในหน่วยความจำ ประกอบด้วย `WarehouseCode`, `ItemId`, `CleansedDemand24M`, สถิติสะอาด 7 ค่า (`CleanMean`, `CleanSd`, `CleanCv`, `CleanActiveMonths`, `CleanAdi`, `CleanTrendR`, `CleanSeasonalR`), `HistoryMonths`, `OutlierMethod` และ `Skewness`, `Kurtosis`, `JbPValue` (เป็น `null` สำหรับสาย KEEP จาก Gate 1 และ Gate 2) เตรียมส่งต่อให้ขั้นตอนเลือกโมเดลพยากรณ์ใน Stage 1.2 (PBI-09 ถึง PBI-12)
 
-> ขอบเขตของงานนี้ครอบคลุมถึง Net Demand, การคัดกรอง Gate 1, Gate 2, การทดสอบ Normality (PBI-05), การตัดยอดแบบ Sigma Capping (PBI-06), การตัดยอดแบบ IQR Capping (PBI-07) และการสรุปชุดข้อมูลสะอาดพร้อมบันทึกประวัติ (PBI-08) ส่วนการนำ `CleansedSkuDemandDto` ไปเลือกโมเดลพยากรณ์ (PBI-09 ถึง PBI-12) ยังไม่ได้ทำในโปรเจกต์นี้
+**จาก Priority Chain Step 1 และ 2 (PBI-09):** ได้ `SkuModelRoutingState` ครบทุก SKU เก็บในหน่วยความจำ ประกอบด้วยข้อมูลเดิม 15 พร็อพเพอร์ตี้จาก `CleansedSkuDemandDto` (ไม่แก้ค่า) และฟิลด์ใหม่ `AssignedModelId`, `AssignedModelName`, `SelectionReason`, `IsShortCircuited` สินค้าที่ถูกดักจะได้โมเดล 1.7 หรือ 1.6 พร้อมเหตุผลและ `IsShortCircuited = true` ส่วนสินค้าที่ผ่านไปจะมีฟิลด์โมเดลเป็น `null` และ `IsShortCircuited = false` เตรียมส่งต่อให้บันไดขั้นที่ 3 และ 4 (PBI-10)
+
+> ขอบเขตของงานนี้ครอบคลุมถึง Net Demand, การคัดกรอง Gate 1, Gate 2, การทดสอบ Normality (PBI-05), การตัดยอดแบบ Sigma Capping (PBI-06), การตัดยอดแบบ IQR Capping (PBI-07) การสรุปชุดข้อมูลสะอาดพร้อมบันทึกประวัติ (PBI-08) และการคัดกรองสินค้าไม่เคยขายกับสินค้าไม่มียอดขาย 3 เดือนล่าสุดเป็นโมเดล 1.7 และ 1.6 (PBI-09) ส่วนการเลือกโมเดลพยากรณ์ในบันไดขั้นถัดไป (PBI-10 ถึง PBI-12) ยังไม่ได้ทำในโปรเจกต์นี้
