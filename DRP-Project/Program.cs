@@ -13,7 +13,7 @@ namespace DRP_Project
 {
     // ======================================================================
     // DRP Outlier Cleansing Engine: จุดเริ่มต้นของโปรแกรม (Console App)
-    // ลำดับ: ต่อ DB -> STEP 1 NetDemand -> STEP 2 Gate 1/2 -> STEP 3 Normality -> STEP 4 Sigma -> STEP 5 IQR -> STEP 6 Finalize -> STEP 7 Priority Chain Step 1 & 2
+    // ลำดับ: ต่อ DB -> STEP 1 NetDemand -> STEP 2 Gate 1/2 -> STEP 3 Normality -> STEP 4 Sigma -> STEP 5 IQR -> STEP 6 Finalize -> STEP 7 Priority Chain Step 1 & 2 -> STEP 8 Priority Chain Step 3 & 4
     // Argument: --warehouse <รหัสคลัง> (ไม่ใส่ = ทุกคลัง) | --period <yyyyMM> (ไม่ใส่ = งวดล่าสุดใน Staging)
     // Program.cs ควบคุมลำดับขั้นตอนเท่านั้น: สูตรอยู่ใน Engine | งาน SQL อยู่ใน Repository / NetDemandPreprocessor | สรุปผลหน้าจออยู่ใน CleansingPipeline
     // Log: Console + ไฟล์ logs/drp-yyyyMMdd.log | Exit Code: 0 = สำเร็จ, 1 = Argument ผิด, 2 = ประมวลผลล้มเหลว
@@ -42,6 +42,7 @@ namespace DRP_Project
             if (args.Contains("--test-iqr")) { IqrCappingTests.RunUnitTests(); return ExitSuccess; }
             if (args.Contains("--test-finalize")) { FinalizeTests.RunUnitTests(); return ExitSuccess; }
             if (args.Contains("--test-model-12")) { ModelStep12Tests.RunUnitTests(); return ExitSuccess; }
+            if (args.Contains("--test-model-34")) { ModelStep34Tests.RunUnitTests(); return ExitSuccess; }
 
             // เปิด Logger หลังตรวจโหมด Test เพราะโหมด Test ใช้ Console ล้วนและไม่ต่อฐานข้อมูล
             InitLogger();
@@ -102,8 +103,16 @@ namespace DRP_Project
                 // ดักสินค้าไม่เคยขาย (1.7 No Sales) และไม่มียอดขาย 3 เดือนล่าสุด (1.6 No Sales L3M) แล้วส่งต่อ State ครบทุก SKU
                 currentStep = "STEP 7: Priority Chain Step 1 & 2";
                 Log.Information(">>> {Step}", currentStep);
-                // State ผลลัพธ์ | ยังไม่มี PBI-10 มารับต่อ จึงเก็บไว้ในตัวแปรก่อน
+                // State ผลลัพธ์ของ Step 1 & 2 | ส่งต่อให้ STEP 8 (PBI-10)
                 List<SkuModelRoutingState> routingStates = ModelRoutingPipeline.RunPriorityChainStep12(cleansedSkuDtos);
+
+                // ===== STEP 8: Priority Chain Step 3 & 4 (PBI-10) =====
+                // โหลด ADI_THRESHOLD จาก M_LOV แล้วจัดสรรโมเดลให้ SKU ที่ยังไม่ถูกตัดจบ: ประวัติ < 12 เดือน -> 1.4 SMA | ADI > เกณฑ์ -> 1.5 Croston
+                // ส่งต่อ State ครบทุก SKU (SKU ที่ได้ 1.7 / 1.6 จาก STEP 7 ถูกข้ามโดยไม่เปลี่ยนค่า)
+                currentStep = "STEP 8: Priority Chain Step 3 & 4";
+                Log.Information(">>> {Step}", currentStep);
+                // State ครบทุก SKU | ยังไม่มี PBI-11 มารับต่อ จึงเก็บไว้ในตัวแปรก่อน
+                routingStates = ModelRoutingPipeline.RunPriorityChainStep34(connection, routingStates);
 
                 Log.Information("ประมวลผลเสร็จสิ้น ใช้เวลา {Seconds:N1} วินาที", stopwatch.Elapsed.TotalSeconds);
                 return ExitSuccess;
