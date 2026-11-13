@@ -3,9 +3,9 @@ using DRP_Project.src.ModelRouting;
 
 namespace DRP_Project.Tests
 {
-    // Unit Test ของ PriorityChainStep12Engine (PBI-09 Step 1 & Step 2) ตรงตาม Jira SCRUM-20 (TC-09-01 ถึง TC-09-08)
+    // Unit Test ของ ModelEngine (PBI-09 Step 1 & Step 2) ตรงตาม Jira SCRUM-20 (TC-09-01 ถึง TC-09-08)
     // ตรวจตรรกะคัดกรองสินค้าไม่เคยขาย (1.7 No Sales) และสินค้าไม่มียอดขาย 3 เดือนล่าสุด (1.6 No Sales L3M)
-    // รันด้วยแฟล็ก --test-priority-step12 (ไม่ต่อฐานข้อมูล)
+    // รันด้วยแฟล็ก --test-model-12 (ไม่ต่อฐานข้อมูล)
     class ModelStep12Tests
     {
         // ข้อความโมเดลตามข้อกำหนด PBI-09
@@ -36,7 +36,7 @@ namespace DRP_Project.Tests
             _passCount = 0;
             _failCount = 0;
 
-            Console.WriteLine("===== Unit Test: PriorityChainStep12Engine (PBI-09 Step 1 & 2) =====\n");
+            Console.WriteLine("===== Unit Test: ModelEngine (PBI-09 Step 1 & 2) =====\n");
 
             // 1. ตรรกะเลือกโมเดลหลัก TC-09-01 ถึง TC-09-06
             RunMainRoutingTests();
@@ -94,7 +94,7 @@ namespace DRP_Project.Tests
             foreach (TestCase tc in cases)
             {
                 var dto = CreateTestDto(tc.Id, tc.CleansedDemand24M, tc.CleanActiveMonths, tc.HistoryMonths, tc.CleanMean, "KEEP");
-                SkuModelRoutingState result = PriorityChainStep12Engine.Evaluate(dto);
+                SkuModelRoutingState result = RunModel1716(new List<CleansedSkuDemandDto> { dto })[0];
 
                 // เทียบผลลัพธ์ทีละฟิลด์
                 bool isPass = result.AssignedModelId == tc.ExpectedModelId &&
@@ -130,7 +130,7 @@ namespace DRP_Project.Tests
             sigmaDto.JbPValue = 0.6500m;
 
             var inputs = new List<CleansedSkuDemandDto> { keepDto, sigmaDto };
-            List<SkuModelRoutingState> outputs = PriorityChainStep12Engine.EvaluateAll(inputs);
+            List<SkuModelRoutingState> outputs = RunModel1716(inputs);
 
             int propCount = typeof(SkuModelRoutingState).GetProperties().Length;   // 15 DTO + 4 Routing
             List<string> keepMismatches = FindMismatches(inputs[0], outputs[0]);
@@ -157,7 +157,7 @@ namespace DRP_Project.Tests
                 CreateTestDto("B2-1.6", BuildCustomDemand(50m, 0m, 0m, 0m), 21, 24, 43.7500m, "KEEP"),
                 CreateTestDto("B3-Pending", Flat(100m, 24), 24, 24, 100.0000m, "KEEP"),
             };
-            List<SkuModelRoutingState> batchResult = PriorityChainStep12Engine.EvaluateAll(batch);
+            List<SkuModelRoutingState> batchResult = RunModel1716(batch);
 
             bool batchPass = batchResult.Count == 3 &&
                              batchResult[0].AssignedModelId == "1.7" &&
@@ -206,12 +206,21 @@ namespace DRP_Project.Tests
             };
         }
 
+        // รัน Model 1.7 แล้ว Model 1.6 ตามลำดับเดียวกับ Pipeline (ผ่าน ModelEngine ตัวเดียวกัน)
+        private static List<SkuModelRoutingState> RunModel1716(List<CleansedSkuDemandDto> dtos)
+        {
+            List<SkuModelRoutingState> states = ModelEngine.ToStates(dtos);
+            ModelEngine.ApplyModel(states, ModelEngine.ApplyModel17);
+            ModelEngine.ApplyModel(states, ModelEngine.ApplyModel16);
+            return states;
+        }
+
         // ส่งอาเรย์เข้า Engine: คืน true ถ้าโยน ArgumentException (ตามที่คาดหวัง)
         private static bool ThrowsArgumentException(decimal[] demand)
         {
             try
             {
-                PriorityChainStep12Engine.Evaluate(new CleansedSkuDemandDto { WarehouseCode = "WH", ItemId = "GUARD", CleansedDemand24M = demand });
+                RunModel1716(new List<CleansedSkuDemandDto> { new CleansedSkuDemandDto { WarehouseCode = "WH", ItemId = "GUARD", CleansedDemand24M = demand } });
                 return false;
             }
             catch (ArgumentException)

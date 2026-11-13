@@ -31,8 +31,9 @@
           CleansingReason     เหตุผลที่เลือกสถานะนั้น
           Demand24M           ข้อมูล Demand ย้อนหลัง 24 เดือน */
 
-        private const decimal SeasonalThreshold = 0.5m;
-        private const decimal TrendThreshold = 0.5m;
+        // public: PBI-11 (Step 5 & 6) ใช้เกณฑ์ชุดเดียวกับ Gate 2 เพื่อไม่ให้ค่าเพี้ยนกันสองที่
+        public const decimal SeasonalThreshold = 0.5m;
+        public const decimal TrendThreshold = 0.5m;
         private const double MaxTrendCorrelation = 0.999999;   // Rules!B21: ป้องกันตัวหาร Partial Correlation เป็นศูนย์
 
         // PBI-03 -> PBI-04: ทุก SKU ผ่าน Gate 1 ก่อน เฉพาะที่ยัง PENDING จึงส่งต่อ Gate 2

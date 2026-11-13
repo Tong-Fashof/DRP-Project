@@ -3,7 +3,7 @@ using DRP_Project.src.ModelRouting;
 
 namespace DRP_Project.Tests
 {
-    // Unit Test ของ PriorityChainStep34Engine (PBI-10 Step 3 & Step 4) ตรงตาม Jira SCRUM-21 (TC-10-01 ถึง TC-10-10)
+    // Unit Test ของ ModelEngine (PBI-10 Step 3 & Step 4) ตรงตาม Jira SCRUM-21 (TC-10-01 ถึง TC-10-10)
     // ตรวจตรรกะคัดกรองสินค้าใหม่ประวัติสั้น (1.4 <12M SMA) และสินค้ายานานๆ ขายที (1.5 Croston Method)
     // รันด้วยแฟล็ก --test-model-34 (ไม่ต่อฐานข้อมูล)
     class ModelStep34Tests
@@ -46,7 +46,7 @@ namespace DRP_Project.Tests
             _passCount = 0;
             _failCount = 0;
 
-            Console.WriteLine("===== Unit Test: PriorityChainStep34Engine (PBI-10 Step 3 & 4) =====\n");
+            Console.WriteLine("===== Unit Test: ModelEngine (PBI-10 Step 3 & 4) =====\n");
 
             // 1. ตรรกะเลือกโมเดลหลัก TC-10-01 ถึง TC-10-08
             RunMainRoutingTests();
@@ -118,7 +118,7 @@ namespace DRP_Project.Tests
             {
                 // สร้าง State จำลองที่ PBI-09 ส่งต่อมา (ยังไม่ถูกตัดจบ) แล้วเรียก Engine ผ่านทางเข้าจริงที่ Pipeline ใช้
                 SkuModelRoutingState state = CreateTestState(tc.Id, tc.CleansedDemand24M, tc.HistoryMonths, tc.CleanActiveMonths, tc.CleanAdi);
-                SkuModelRoutingState result = PriorityChainStep34Engine.EvaluateAll(new List<SkuModelRoutingState> { state }, tc.AdiThreshold)[0];
+                SkuModelRoutingState result = RunModel1415(new List<SkuModelRoutingState> { state }, tc.AdiThreshold)[0];
 
                 // เทียบผลลัพธ์ทีละฟิลด์ + ตรวจว่า Metadata ในตาราง Jira สะท้อนเวกเตอร์ยอดขายจริง (กันพิมพ์เลขผิด)
                 bool metadataMatchesVector = MetadataMatchesVector(tc.CleansedDemand24M, tc.HistoryMonths, tc.CleanActiveMonths, tc.CleanAdi);
@@ -153,7 +153,7 @@ namespace DRP_Project.Tests
             skuB.SelectionReason = L3MReason;
             skuB.IsShortCircuited = true;
 
-            List<SkuModelRoutingState> passThrough = PriorityChainStep34Engine.EvaluateAll(new List<SkuModelRoutingState> { skuA, skuB }, DefaultAdi);
+            List<SkuModelRoutingState> passThrough = RunModel1415(new List<SkuModelRoutingState> { skuA, skuB }, DefaultAdi);
 
             bool passThroughPass = passThrough.Count == 2 &&
                                    HasRouting(passThrough[0], "1.7", NoSalesName, NoSalesReason, true) &&
@@ -170,7 +170,7 @@ namespace DRP_Project.Tests
             // ===== TC-10-10: M_LOV Configuration Fallback Guard =====
             // M_LOV ไม่พบ ADI_THRESHOLD -> Pipeline ส่งค่า Default ให้ Engine (การอ่านจาก DB อยู่ใน LoadLovDecimal ซึ่ง Unit Test นี้ไม่ต่อฐานข้อมูล)
             // จึงตรวจ 2 อย่าง: (1) ค่า Default ที่ Pipeline ใช้ = 1.320000 (2) Engine ใช้ค่านี้ตัดสินได้ถูกต้องโดยไม่โยน Exception
-            decimal fallbackThreshold = PriorityChainStep34Engine.DefaultAdiThreshold;
+            decimal fallbackThreshold = ModelEngine.DefaultAdiThreshold;
             bool defaultOk = fallbackThreshold == 1.320000m;
 
             decimal[] fallbackDemand = Segments((20m, 17), (0m, 6), (20m, 1));   // M1..M17 = 20, M18..M23 = 0, M24 = 20
@@ -180,7 +180,7 @@ namespace DRP_Project.Tests
             SkuModelRoutingState? fallbackResult = null;
             try
             {
-                fallbackResult = PriorityChainStep34Engine.EvaluateAll(new List<SkuModelRoutingState> { fallbackState }, fallbackThreshold)[0];
+                fallbackResult = RunModel1415(new List<SkuModelRoutingState> { fallbackState }, fallbackThreshold)[0];
             }
             catch (Exception)
             {
@@ -209,6 +209,15 @@ namespace DRP_Project.Tests
             Console.WriteLine($"   Actual   : {actual}");
             Console.WriteLine();
         }
+
+        // รัน Model 1.4 แล้ว Model 1.5 ตามลำดับเดียวกับ Pipeline (ผ่าน ModelEngine ตัวเดียวกัน) แล้วคืน List เดิม
+        private static List<SkuModelRoutingState> RunModel1415(List<SkuModelRoutingState> states, decimal adiThreshold)
+        {
+            ModelEngine.ApplyModel(states, ModelEngine.ApplyModel14);
+            ModelEngine.ApplyModel(states, state => ModelEngine.ApplyModel15(state, adiThreshold));
+            return states;
+        }
+
 
         // สร้าง State จำลองจาก PBI-09 (ฟิลด์ที่ไม่เกี่ยวกับเคสใช้ค่ากลางๆ ฟิลด์ Routing เริ่มเป็น null / false = ยังไม่ถูกตัดจบ)
         private static SkuModelRoutingState CreateTestState(string id, decimal[] demand, int historyMonths, int activeMonths, decimal adi)
