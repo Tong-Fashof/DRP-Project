@@ -59,6 +59,69 @@ namespace DRP_Project.src.ModelRouting
                 state => ModelEngine.ApplyModel12(state, trendThreshold));
         }
 
+        // ===================== PBI-11B =====================
+
+        // PBI-11B: ประกอบ SkuForecastResult 72 คอลัมน์ต่อ SKU ในหน่วยความจำ ส่งต่อ PBI-12 | ไม่เขียน DB
+        // โหลดเกณฑ์ M_LOV 11 ตัว (ไม่พบ/แปลงไม่ได้ -> Default ตามสเปก และมี Warning ใน log)
+        // asOfPeriod = งวดล่าสุดของช่วง 24 เดือน (period_year_month มากสุดจาก PREP)
+        public static List<SkuForecastResult> RunAssemble(SqlConnection connection, List<SkuModelRoutingState> states, List<SkuCleansingCandidate> candidates, string? targetWarehouseCode)
+        {
+            var config = new AssemblerConfig
+            {
+                ProtectTrendSeason = OutlierCleansingRepository.LoadLovDecimal(connection, "PROTECT_TREND_SEASON", 1.000000m),
+                AdiThreshold = OutlierCleansingRepository.LoadLovDecimal(connection, "ADI_THRESHOLD", ModelEngine.DefaultAdiThreshold),
+                CvThreshold = OutlierCleansingRepository.LoadLovDecimal(connection, "CV_THRESHOLD", SigmaCappingEngine.DefaultCvThreshold),
+                JbPValueThreshold = OutlierCleansingRepository.LoadLovDecimal(connection, "JB_PVALUE_THRESHOLD", NormalityEngine.DefaultPValueThreshold),
+                SkewNormalLimit = OutlierCleansingRepository.LoadLovDecimal(connection, "SKEW_NORMAL_LIMIT", NormalityEngine.DefaultSkewLimit),
+                KurtNormalLimit = OutlierCleansingRepository.LoadLovDecimal(connection, "KURT_NORMAL_LIMIT", NormalityEngine.DefaultKurtLimit),
+                SigmaCapMultiplier = OutlierCleansingRepository.LoadLovDecimal(connection, "SIGMA_CAP_MULTIPLIER", SigmaCappingEngine.DefaultSigmaCapMultiplier),
+                SkewModerateLimit = OutlierCleansingRepository.LoadLovDecimal(connection, "SKEW_MODERATE_LIMIT", IqrCappingEngine.DefaultSkewModerateLimit),
+                KurtModerateLimit = OutlierCleansingRepository.LoadLovDecimal(connection, "KURT_MODERATE_LIMIT", IqrCappingEngine.DefaultKurtModerateLimit),
+                SeasonalCorrelation = OutlierCleansingRepository.LoadLovDecimal(connection, "SEASONAL_CORRELATION", ModelEngine.DefaultSeasonalThreshold),
+                TrendCorrelation = OutlierCleansingRepository.LoadLovDecimal(connection, "TREND_CORRELATION", ModelEngine.DefaultTrendThreshold)
+            };
+
+            Dictionary<int, string> periodMap = OutlierCleansingRepository.LoadPeriodMap(connection, targetWarehouseCode);
+            if (periodMap.Count == 0)
+                throw new InvalidOperationException("ไม่พบ period_year_month ใน DRP_FCT_SKU_MONTHLY_DEMAND_PREP (PBI-11B ต้องใช้ as_of_period)");
+            string asOfPeriod = periodMap.Values.OrderByDescending(p => p, StringComparer.Ordinal).First();
+
+            List<SkuForecastResult> results = ForecastResultAssembler.AssembleAll(states, candidates, asOfPeriod, config);
+
+            Console.WriteLine();
+            Console.WriteLine("--- PBI-11B In-Memory Assembler (72 คอลัมน์) ---");
+            Console.WriteLine($"as_of_period                : {asOfPeriod}");
+            Console.WriteLine($"Input (SKU ทั้งหมด)          : {states.Count}");
+            Console.WriteLine($"Output (Record)             : {results.Count}");
+            Console.WriteLine($"ได้โมเดล Step 1-6 (short)    : {results.Count(r => r.IsShortCircuited)}");
+            Console.WriteLine($"รอ Step 7 SES (PBI-12)       : {results.Count(r => !r.IsShortCircuited)}");
+
+            Console.WriteLine();
+            Console.WriteLine("--- PBI-11B : selected_outlier_tool ---");
+            foreach (var g in results.GroupBy(r => r.SelectedOutlierTool).OrderByDescending(g => g.Count()))
+                Console.WriteLine($"{g.Key,-12} {g.Count(),8:N0}");
+
+            Console.WriteLine();
+            Console.WriteLine("--- PBI-11B : xyz_class ---");
+            foreach (var g in results.GroupBy(r => r.XyzClass).OrderByDescending(g => g.Count()))
+                Console.WriteLine($"{g.Key,-12} {g.Count(),8:N0}");
+
+            Console.WriteLine();
+            Console.WriteLine("--- PBI-11B : source_check ---");
+            foreach (var g in results.GroupBy(r => r.SourceCheck).OrderByDescending(g => g.Count()))
+                Console.WriteLine($"{g.Key,-28} {g.Count(),8:N0}");
+
+            Console.WriteLine();
+            Console.WriteLine("--- PBI-11B : แยกตามคลัง ---");
+            foreach (var g in results.GroupBy(r => r.WarehouseCode).OrderBy(g => g.Key, StringComparer.Ordinal))
+                Console.WriteLine($"{g.Key,-12} รวม {g.Count(),7:N0} | ได้โมเดลแล้ว {g.Count(r => r.IsShortCircuited),7:N0} | รอ SES {g.Count(r => !r.IsShortCircuited),7:N0}");
+
+            Log.Information("PBI-11B ประกอบเสร็จสิ้น {Total} SKU (ได้โมเดลแล้ว={Short} รอ SES={Pending})",
+                results.Count, results.Count(r => r.IsShortCircuited), results.Count(r => !r.IsShortCircuited));
+
+            return results;
+        }
+
         // ตัวช่วยร่วมของทุก Model: รัน 1 โมเดลผ่าน ModelEngine แล้วแสดงสรุป (รวมและแยกตามคลัง) + log | ไม่มีสูตร
         private static List<SkuModelRoutingState> Run(List<SkuModelRoutingState> states, string modelId, string modelName, string criteria, Func<SkuModelRoutingState, bool> rule)
         {

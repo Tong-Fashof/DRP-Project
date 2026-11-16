@@ -14,6 +14,11 @@
         public string CleansingStatus { get; set; } = "PENDING";
         public string? CleansingMethod { get; set; }
         public string? CleansingReason { get; set; }
+
+        // PBI-11B: ข้อมูลต้นทางที่ Loader เก็บเพิ่มจาก DRP_FCT_SKU_MONTHLY_DEMAND_PREP (ใช้ตรวจ source_check / total / negative_months_count)
+        public decimal[] RawSales24M { get; set; } = new decimal[24];     // raw_sales_qty (อาจติดลบ)
+        public decimal[] OosUplift24M { get; set; } = new decimal[24];    // oos_uplift_qty (PREP เก็บหลังปรับ MAX(0,·) แล้ว)
+        public int MonthsPresent { get; set; }                            // จำนวนแถวเดือน (month_no 1..24) ที่พบจริง
     }
 
     public static class CleansingEngine

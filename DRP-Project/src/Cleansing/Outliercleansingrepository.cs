@@ -50,7 +50,9 @@ namespace DRP_Project.src.Cleansing
 				warehouse_code,
 				item_id,
 				month_no,
-				net_demand_qty
+				net_demand_qty,
+				raw_sales_qty,
+				oos_uplift_qty
 			FROM DRP_FCT_SKU_MONTHLY_DEMAND_PREP
 			WHERE (@TargetWarehouseCode IS NULL OR warehouse_code = @TargetWarehouseCode)";
 
@@ -91,6 +93,11 @@ namespace DRP_Project.src.Cleansing
 
                 // เพิ่มค่า net_demand_qty ลงใน Demand24M ของ SkuCleansingCandidate ตาม month_no
                 map[key].Demand24M[month_no - 1] += net_demand_qty;
+
+                // PBI-11B: เก็บ raw / oos และนับเดือนที่พบ (NULL นับเป็น 0)
+                map[key].RawSales24M[month_no - 1] += reader["raw_sales_qty"] == DBNull.Value ? 0m : Convert.ToDecimal(reader["raw_sales_qty"]);
+                map[key].OosUplift24M[month_no - 1] += reader["oos_uplift_qty"] == DBNull.Value ? 0m : Convert.ToDecimal(reader["oos_uplift_qty"]);
+                map[key].MonthsPresent++;
             }
 
             // สรุปครั้งเดียวต่อการโหลด (ไม่ log ทีละแถว)

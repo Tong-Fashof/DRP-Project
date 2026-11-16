@@ -13,7 +13,7 @@ namespace DRP_Project
 {
     // ======================================================================
     // DRP Outlier Cleansing Engine: จุดเริ่มต้นของโปรแกรม (Console App)
-    // ลำดับ: ต่อ DB -> STEP 1 NetDemand -> STEP 2 Gate 1/2 -> STEP 3 Normality -> STEP 4 Sigma -> STEP 5 IQR -> STEP 6 Finalize -> STEP 7 Model 1.7 -> STEP 8 Model 1.6 -> STEP 9 Model 1.4 -> STEP 10 Model 1.5 -> STEP 11 Model 1.1 -> STEP 12 Model 1.2
+    // ลำดับ: ต่อ DB -> STEP 1 NetDemand -> STEP 2 Gate 1/2 -> STEP 3 Normality -> STEP 4 Sigma -> STEP 5 IQR -> STEP 6 Finalize -> STEP 7 Model 1.7 -> STEP 8 Model 1.6 -> STEP 9 Model 1.4 -> STEP 10 Model 1.5 -> STEP 11 Model 1.1 -> STEP 12 Model 1.2 -> STEP 13 PBI-11B Assembler
     // Argument: --warehouse <รหัสคลัง> (ไม่ใส่ = ทุกคลัง) | --period <yyyyMM> (ไม่ใส่ = งวดล่าสุดใน Staging)
     // Program.cs ควบคุมลำดับขั้นตอนเท่านั้น: สูตรอยู่ใน Engine | งาน SQL อยู่ใน Repository / NetDemandPreprocessor | สรุปผลหน้าจออยู่ใน CleansingPipeline
     // Log: Console + ไฟล์ logs/drp-yyyyMMdd.log | Exit Code: 0 = สำเร็จ, 1 = Argument ผิด, 2 = ประมวลผลล้มเหลว
@@ -136,7 +136,13 @@ namespace DRP_Project
                 Log.Information(">>> {Step}", currentStep);
                 routingStates = ModelRoutingPipeline.RunModel12(connection, routingStates);
 
-                // State ครบทุก SKU | SKU ที่ไม่เข้า Model 1.1 และ 1.2 ยังไม่มีโมเดล รอ PBI-11B / PBI-12 (Model 1.3 SES) จึงเก็บไว้ในตัวแปรก่อน
+                // State ครบทุก SKU | SKU ที่ไม่เข้า Model 1.1 และ 1.2 ยังไม่มีโมเดล (null) ส่งต่อ PBI-11B -> PBI-12 (Model 1.3 SES)
+
+                // ===== STEP 13: In-Memory Pipeline Assembler (PBI-11B) =====
+                // ประกอบ 72 คอลัมน์ต่อ SKU จากผล PBI-02..11 ในหน่วยความจำ (ส่งต่อ PBI-12 | ไม่เขียน DB)
+                currentStep = "STEP 13: In-Memory Pipeline Assembler (PBI-11B)";
+                Log.Information(">>> {Step}", currentStep);
+                List<SkuForecastResult> forecastResults = ModelRoutingPipeline.RunAssemble(connection, routingStates, candidates, targetWarehouseCode);
 
                 Log.Information("ประมวลผลเสร็จสิ้น ใช้เวลา {Seconds:N1} วินาที", stopwatch.Elapsed.TotalSeconds);
                 return ExitSuccess;
