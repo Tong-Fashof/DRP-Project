@@ -13,7 +13,7 @@ namespace DRP_Project
 {
     // ======================================================================
     // DRP Outlier Cleansing Engine: จุดเริ่มต้นของโปรแกรม (Console App)
-    // ลำดับ: ต่อ DB -> STEP 1 NetDemand -> STEP 2 Gate 1/2 -> STEP 3 Normality -> STEP 4 Sigma -> STEP 5 IQR -> STEP 6 Finalize -> STEP 7 Model 1.7 -> STEP 8 Model 1.6 -> STEP 9 Model 1.4 -> STEP 10 Model 1.5 -> STEP 11 Model 1.1 -> STEP 12 Model 1.2 -> STEP 13 PBI-11B Assembler
+    // ลำดับ: ต่อ DB -> STEP 1 NetDemand -> STEP 2 Gate 1/2 -> STEP 3 Normality -> STEP 4 Sigma -> STEP 5 IQR -> STEP 6 Finalize -> STEP 7 Model 1.7 -> STEP 8 Model 1.6 -> STEP 9 Model 1.4 -> STEP 10 Model 1.5 -> STEP 11 Model 1.1 -> STEP 12 Model 1.2 -> STEP 13 PBI-11B Assembler -> STEP 14 Model 1.3 SES (PBI-12) -> STEP 15 Save (PBI-12)
     // Argument: --warehouse <รหัสคลัง> (ไม่ใส่ = ทุกคลัง) | --period <yyyyMM> (ไม่ใส่ = งวดล่าสุดใน Staging)
     // Program.cs ควบคุมลำดับขั้นตอนเท่านั้น: สูตรอยู่ใน Engine | งาน SQL อยู่ใน Repository / NetDemandPreprocessor | สรุปผลหน้าจออยู่ใน CleansingPipeline
     // Log: Console + ไฟล์ logs/drp-yyyyMMdd.log | Exit Code: 0 = สำเร็จ, 1 = Argument ผิด, 2 = ประมวลผลล้มเหลว
@@ -22,6 +22,7 @@ namespace DRP_Project
     {
         private static string? targetWarehouseCode = null;   // กรองเฉพาะคลังนี้ (null = ทุกคลัง)
         private static string? targetPeriod = null;          // งวดที่ต้องการประมวลผล รูปแบบ yyyyMM (null = ค่าเริ่มต้นของ NetDemand)
+        private static bool isPreviewOnly = false;           // true = ส่งออก CSV ดูผลลัพธ์ก่อน ไม่ลง DB
 
         // Exit Code: ให้ Scheduler (Task Scheduler / SQL Agent) แยกผลการรันได้
         private const int ExitSuccess = 0;
@@ -32,8 +33,7 @@ namespace DRP_Project
 
         static int Main(string[] args)
         {
-            // โหมด Unit Test: ตรวจก่อนต่อฐานข้อมูล แล้วจบโปรแกรมทันที (ใช้ Console ล้วน ไม่เปิด Logger)
-            // รัน Unit Test (ไม่ต่อฐานข้อมูล): --test-netdemand | --test-gate1 | --test-gate2 | --test-normality | --test-sigma | --test-iqr | --test-finalize | --test-model-12 | --test-model-34 | --test-model-56
+            // โหมด Unit Test (ไม่ต่อฐานข้อมูล): ตรวจก่อนต่อฐานข้อมูล แล้วจบโปรแกรมทันที (ใช้ Console ล้วน ไม่เปิด Logger)
             if (args.Contains("--test-netdemand")) { NetDemandTests.RunUnitTests(); return ExitSuccess; }
             if (args.Contains("--test-gate1")) { Gate1.RunUnitTests(); return ExitSuccess; }
             if (args.Contains("--test-gate2")) { Gate2.RunUnitTests(); return ExitSuccess; }
@@ -44,16 +44,20 @@ namespace DRP_Project
             if (args.Contains("--test-model-12")) { ModelStep12Tests.RunUnitTests(); return ExitSuccess; }
             if (args.Contains("--test-model-34")) { ModelStep34Tests.RunUnitTests(); return ExitSuccess; }
             if (args.Contains("--test-model-56")) { ModelStep56Tests.RunUnitTests(); return ExitSuccess; }
+            if (args.Contains("--test-assembler")) { ForecastResultAssemblerTests.RunUnitTests(); return ExitSuccess; }
+            if (args.Contains("--test-ses")) { SesFallbackTests.RunUnitTests(); return ExitSuccess; }
 
-            // เปิด Logger หลังตรวจโหมด Test เพราะโหมด Test ใช้ Console ล้วนและไม่ต่อฐานข้อมูล
-            InitLogger();
             // จับเวลารวมทั้ง run (เวลาของแต่ละขั้นดูจาก Timestamp ใน log)
+            InitLogger();                           
             var stopwatch = Stopwatch.StartNew();
 
             // Fail-fast: ขั้นใดล้มเหลว ให้หยุดทั้ง run เพราะ Save เป็นแบบลบแล้วเขียนใหม่ทั้งชุด การข้ามบาง SKU จะทำให้ข้อมูลหายเงียบ
             try
             {
-                if (!TryParseArgs(args)) return ExitArgumentError;   // Argument ผิดรูปแบบ -> จบโปรแกรม (log ไว้แล้วใน TryParseArgs)
+                if (!TryParseArgs(args))
+                {
+                    return ExitArgumentError;   // Argument ผิดรูปแบบ -> จบโปรแกรม (log ไว้แล้วใน TryParseArgs)
+                }
 
                 Log.Information("เริ่มประมวลผล Warehouse={Warehouse} Period={Period}", targetWarehouseCode ?? "ALL", targetPeriod ?? "DEFAULT");
 
@@ -144,6 +148,28 @@ namespace DRP_Project
                 Log.Information(">>> {Step}", currentStep);
                 List<SkuForecastResult> forecastResults = ModelRoutingPipeline.RunAssemble(connection, routingStates, candidates, targetWarehouseCode);
 
+                // ===== STEP 14: Model 1.3 SES Fallback (PBI-12 Step 7) =====
+                // ตรวจ Inconsistent State แล้วกำหนด SES ให้ SKU ที่ยังไม่ได้โมเดล (รับประกันไม่มี SKU ตกค้าง)
+                currentStep = "STEP 14: Model 1.3 SES Fallback (PBI-12 Step 7)";
+                Log.Information(">>> {Step}", currentStep);
+                ModelRoutingPipeline.RunSesFallback(forecastResults);
+
+                // ===== STEP 15: Save Golden Deliverable Table (PBI-12) =====
+                // ลบตามคลัง -> Bulk Insert 72 คอลัมน์ -> ซิงค์ outlier_status 24 งวด/SKU ใน Transaction เดียว
+                currentStep = "STEP 15: Save Golden Deliverable Table (PBI-12)";
+                Log.Information(">>> {Step}", currentStep);
+                DateTime createdAt = DateTime.UtcNow;   // กำหนดเวลา CreatedAt เหมือนตอน Save จริง
+                foreach (var r in forecastResults) r.CreatedAt = createdAt;
+                if (isPreviewOnly)
+                {
+                    string csvFile = ForecastResultRepository.ExportPreviewCsv(forecastResults);
+                    Log.Information("โหมด Preview: ส่งออกข้อมูล ({Count} แถว) เรียบร้อยที่ไฟล์ {Path}", forecastResults.Count, csvFile);
+                }
+                else
+                {
+                    ModelRoutingPipeline.RunSave(connection, forecastResults);
+                }
+
                 Log.Information("ประมวลผลเสร็จสิ้น ใช้เวลา {Seconds:N1} วินาที", stopwatch.Elapsed.TotalSeconds);
                 return ExitSuccess;
             }
@@ -179,11 +205,11 @@ namespace DRP_Project
 
                 // ไฟล์: มี RunId และ Stack Trace เต็ม | ชื่อไฟล์ลงท้ายด้วย "-" เพื่อให้ Serilog ต่อวันที่ (yyyyMMdd) ให้อัตโนมัติ
                 .WriteTo.File(
-                    path: logPath,
-                    rollingInterval: RollingInterval.Day,
-                    retainedFileCountLimit: 7,
-                    encoding: new UTF8Encoding(encoderShouldEmitUTF8Identifier: true),   // BOM ให้ Notepad เปิดภาษาไทยถูก
-                    outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff} [{Level:u3}] [{RunId}] {Message:lj}{NewLine}{Exception}")
+                    path: logPath,                                                                                                  // logs/drp-yyyyMMdd.log
+                    rollingInterval: RollingInterval.Day,                                                                           // ต่อวันที่อัตโนมัติ
+                    retainedFileCountLimit: 7,                                                                                      // เก็บ 7 วัน | เกินนี้ลบอัตโนมัติ
+                    encoding: new UTF8Encoding(encoderShouldEmitUTF8Identifier: true),                                              // BOM ให้ Notepad เปิดภาษาไทยถูก
+                    outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff} [{Level:u3}] [{RunId}] {Message:lj}{NewLine}{Exception}")  // Exception = Stack Trace เต็ม
                 .CreateLogger();
         }
 
@@ -210,6 +236,10 @@ namespace DRP_Project
                         Log.Error("--period ต้องเป็นรูปแบบ yyyyMM เช่น 202609 (ได้รับ: {Period})", targetPeriod);
                         return false;
                     }
+                }
+                else if (args[i] == "--preview")
+                {
+                    isPreviewOnly = true;
                 }
                 else
                 {

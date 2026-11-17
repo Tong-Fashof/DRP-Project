@@ -122,6 +122,50 @@ namespace DRP_Project.src.ModelRouting
             return results;
         }
 
+        // ===================== PBI-12 =====================
+
+        // PBI-12 Step 7: กำหนด Model 1.3 SES ให้ SKU ที่ยังไม่ได้โมเดล (Guard Inconsistent State ก่อน) | ไม่เขียน DB
+        public static void RunSesFallback(List<SkuForecastResult> results)
+        {
+            int total = results.Count;
+            int keptBefore = results.Count(r => r.IsShortCircuited);
+            int assigned = SesFallbackEngine.ApplyAll(results);
+
+            Console.WriteLine();
+            Console.WriteLine($"--- Model {SesFallbackEngine.Model13Id} {SesFallbackEngine.Model13Name} (PBI-12 Step 7) ---");
+            Console.WriteLine($"Input (SKU ทั้งหมด)   : {total}");
+            Console.WriteLine($"คงโมเดลเดิม Step 1-6   : {keptBefore}");
+            Console.WriteLine($"ได้ Model {SesFallbackEngine.Model13Id}      : {assigned}");
+
+            Console.WriteLine();
+            Console.WriteLine($"--- Model {SesFallbackEngine.Model13Id} : แยกตามคลัง ---");
+            foreach (var g in results.GroupBy(r => r.WarehouseCode).OrderBy(g => g.Key, StringComparer.Ordinal))
+                Console.WriteLine($"{g.Key,-12} รวม {g.Count(),7:N0} | Step 1-6 {g.Count(r => r.AssignedModelId != SesFallbackEngine.Model13Id),7:N0} | SES {g.Count(r => r.AssignedModelId == SesFallbackEngine.Model13Id),7:N0}");
+
+            Log.Information("Model {ModelId} (Step 7) เสร็จสิ้น SKU {Total}: คงเดิม={Kept} ได้={Assigned}", SesFallbackEngine.Model13Id, total, keptBefore, assigned);
+        }
+
+        // PBI-12: บันทึก 72 คอลัมน์ลง DRP_FCT_SKU_FORECAST_ROUTING_RESULT + ซิงค์ outlier_status ลง DRP_FCT_SKU_OUTLIER_CLEANSING (Transaction เดียว)
+        public static void RunSave(SqlConnection connection, List<SkuForecastResult> results)
+        {
+            // Guard: Save ลบของเดิมตามคลังแล้วเขียนใหม่ ถ้าไม่มีข้อมูลเลยให้หยุด (ไม่ล้างตารางเงียบๆ)
+            if (results.Count == 0)
+                throw new InvalidOperationException("ไม่มีข้อมูลสำหรับบันทึก (ไม่พบ SKU) ยกเลิกการบันทึกเพื่อป้องกันการล้างตารางปลายทาง");
+
+            // created_at = เวลาบันทึกลงตาราง (calculated_at คงค่าจาก PBI-11B)
+            DateTime createdAt = DateTime.UtcNow;
+            foreach (var r in results) r.CreatedAt = createdAt;
+
+            ForecastResultRepository.Save(connection, results);
+
+            Console.WriteLine();
+            Console.WriteLine("--- PBI-12 : บันทึกลงฐานข้อมูล ---");
+            Console.WriteLine($"DRP_FCT_SKU_FORECAST_ROUTING_RESULT : {results.Count} แถว (72 คอลัมน์)");
+            Console.WriteLine($"DRP_FCT_SKU_OUTLIER_CLEANSING       : ซิงค์ outlier_status {results.Count * 24} แถว");
+
+            Log.Information("PBI-12 บันทึกสำเร็จ {Rows} SKU, ซิงค์ outlier_status {StatusRows} แถว", results.Count, results.Count * 24);
+        }
+
         // ตัวช่วยร่วมของทุก Model: รัน 1 โมเดลผ่าน ModelEngine แล้วแสดงสรุป (รวมและแยกตามคลัง) + log | ไม่มีสูตร
         private static List<SkuModelRoutingState> Run(List<SkuModelRoutingState> states, string modelId, string modelName, string criteria, Func<SkuModelRoutingState, bool> rule)
         {
