@@ -1,4 +1,4 @@
-﻿using DRP_Project.src.Cleansing;
+using DRP_Project.src.Cleansing;
 using DRP_Project.src.ModelRouting;
 using DRP_Project.src.NetDemand;
 using DRP_Project.Tests;
@@ -34,6 +34,7 @@ namespace DRP_Project
         static int Main(string[] args)
         {
             // โหมด Unit Test (ไม่ต่อฐานข้อมูล): ตรวจก่อนต่อฐานข้อมูล แล้วจบโปรแกรมทันที (ใช้ Console ล้วน ไม่เปิด Logger)
+            if (args.Contains("--test-ingestion")) { IngestionTests.RunAllTests(); return ExitSuccess; }
             if (args.Contains("--test-netdemand")) { NetDemandTests.RunUnitTests(); return ExitSuccess; }
             if (args.Contains("--test-gate1")) { Gate1.RunUnitTests(); return ExitSuccess; }
             if (args.Contains("--test-gate2")) { Gate2.RunUnitTests(); return ExitSuccess; }
@@ -46,19 +47,31 @@ namespace DRP_Project
             if (args.Contains("--test-model-56")) { ModelStep56Tests.RunUnitTests(); return ExitSuccess; }
             if (args.Contains("--test-assembler")) { ForecastResultAssemblerTests.RunUnitTests(); return ExitSuccess; }
             if (args.Contains("--test-ses")) { SesFallbackTests.RunUnitTests(); return ExitSuccess; }
+            if (args.Contains("--test-all"))
+            {
+                IngestionTests.RunAllTests();
+                NetDemandTests.RunUnitTests();
+                Gate1.RunUnitTests();
+                Gate2.RunUnitTests();
+                NormalityTests.RunUnitTests();
+                SigmaCappingTests.RunUnitTests();
+                IqrCappingTests.RunUnitTests();
+                FinalizeTests.RunUnitTests();
+                ModelStep12Tests.RunUnitTests();
+                ModelStep34Tests.RunUnitTests();
+                ModelStep56Tests.RunUnitTests();
+                ForecastResultAssemblerTests.RunUnitTests();
+                SesFallbackTests.RunUnitTests();
+                return ExitSuccess;
+            }
 
-            // จับเวลารวมทั้ง run (เวลาของแต่ละขั้นดูจาก Timestamp ใน log)
-            InitLogger();                           
-            var stopwatch = Stopwatch.StartNew();
-
-            // Fail-fast: ขั้นใดล้มเหลว ให้หยุดทั้ง run เพราะ Save เป็นแบบลบแล้วเขียนใหม่ทั้งชุด การข้ามบาง SKU จะทำให้ข้อมูลหายเงียบ
+            // เปิด Logger หลังตรวจโหมด Test เพราะโหมด Test ใช้ Console ล้วนและไม่ต่อฐานข้อมูล
+            InitLogger();
+            var stopwatch = Stopwatch.StartNew();   // จับเวลารวมทั้ง run (เวลาของแต่ละขั้นดูจาก Timestamp ใน log)
             try
             {
-                if (!TryParseArgs(args))
-                {
-                    return ExitArgumentError;   // Argument ผิดรูปแบบ -> จบโปรแกรม (log ไว้แล้วใน TryParseArgs)
-                }
-
+                // Argument ผิดรูปแบบ -> จบโปรแกรม (log ไว้แล้วใน TryParseArgs)
+                if (!TryParseArgs(args)) return ExitArgumentError;   
                 Log.Information("เริ่มประมวลผล Warehouse={Warehouse} Period={Period}", targetWarehouseCode ?? "ALL", targetPeriod ?? "DEFAULT");
 
                 currentStep = "เชื่อมต่อฐานข้อมูล";
