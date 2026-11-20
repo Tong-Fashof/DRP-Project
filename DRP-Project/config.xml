@@ -1,7 +1,28 @@
-﻿<?xml version="1.0" encoding="utf-8" ?>
+<?xml version="1.0" encoding="utf-8" ?>
 <config>
+	<!-- ===== Target DB (DRP: AxWebReport_UAT) ===== -->
 	<Server>192.168.2.117,9823</Server>
 	<Database>AxWebReport_UAT</Database>
 	<UserId>dev</UserId>
 	<Password>P@ssw0rd22</Password>
+
+	<!-- ===== Source 1: SQL Server =====
+	     ตาราง: INVENTTABLE, SALESORDER, CUSTTABLE, SALESPFN และ BRANCH -->
+	<SourceSql>
+		<Server>192.168.2.103,5879</Server>
+		<Database>fashof_data</Database>
+		<UserId>dev</UserId>
+		<Password>w,j9hv'[vdCyoot</Password>
+	</SourceSql>
+
+	<!-- ===== Source 2: MariaDB =====
+	     ตาราง: md_wishlist, customers -->
+	<SourceMariaDb>
+		<Server>141.98.18.235</Server>
+		<Port>3306</Port>
+		<Database>admin_db</Database>
+		<UserId>admin_db</UserId>
+		<Password>n8RBXJ2fW3gScqQmgHq4</Password>
+		<SslMode>Preferred</SslMode>
+	</SourceMariaDb>
 </config>

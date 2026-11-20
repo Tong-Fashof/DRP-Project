@@ -34,6 +34,9 @@
         // ประวัติขั้นต่ำที่ทดสอบได้ (Rules!B4) ตัวป้องกันสำรอง เพราะ Gate 1 ล็อก SKU ประวัติ < 12 เป็น KEEP ไปก่อนแล้ว
         private const int MinHistoryMonths = 12;
 
+        // ความแปรปรวนของ Window ที่น้อยกว่านี้ (สัมพัทธ์กับค่าเฉลี่ย) ถือว่ายอดคงที่ ไม่ใช่การกระจายจริง
+        private const double ConstantTolerance = 1e-9;
+
         // ประเมินทุก SKU: คืนผล 1 รายการต่อ 1 candidate (ผู้เรียกกรองเฉพาะ PENDING มาก่อน)
         public static List<SkuNormalityResult> EvaluateAll(IEnumerable<SkuCleansingCandidate> pendingCandidates, decimal pValueThreshold, decimal skewLimit, decimal kurtLimit)
         {
@@ -113,7 +116,16 @@
             double s = Math.Sqrt(sumSq / (n - 1));
 
             // กันหารศูนย์: ยอดเท่ากันทุกเดือนใน Window (sd 24 งวดอาจไม่เป็น 0 เพราะมีเลข 0 นำหน้า)
-            if (s == 0.0 || double.IsNaN(s)) return (0.0, 0.0, 0.0, 1.0);
+            // ห้ามเทียบ s == 0.0 อย่างเดียว: ยอดคงที่ผ่าน double จะเกิด precision drift (เช่น s ~ 1e-15)
+            // ทำให้ z-score ถูกขยายจนได้ Skewness/Kurtosis ปลอม -> ตรวจ "ค่าเท่ากันทุกงวด" บน decimal ก่อน (ไม่มี drift)
+            // และใช้ tolerance สัมพัทธ์เป็นตัวป้องกันชั้นที่สอง
+            bool isConstantWindow = true;
+            for (int i = 1; i < n; i++)
+            {
+                if (demand[start + i] != demand[start]) { isConstantWindow = false; break; }
+            }
+            if (isConstantWindow || double.IsNaN(s) || s <= ConstantTolerance * Math.Max(1.0, Math.Abs(yBar)))
+                return (0.0, 0.0, 0.0, 1.0);
 
             // z = (y-ȳ)/s แล้วรวมกำลัง 3 และ 4
             double sumZ3 = 0.0, sumZ4 = 0.0;

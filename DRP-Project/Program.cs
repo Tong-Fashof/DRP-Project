@@ -1,4 +1,5 @@
 using DRP_Project.src.Cleansing;
+using DRP_Project.src.Ingestion;
 using DRP_Project.src.ModelRouting;
 using DRP_Project.src.NetDemand;
 using DRP_Project.Tests;
@@ -13,8 +14,10 @@ namespace DRP_Project
 {
     // ======================================================================
     // DRP Outlier Cleansing Engine: จุดเริ่มต้นของโปรแกรม (Console App)
-    // ลำดับ: ต่อ DB -> STEP 1 NetDemand -> STEP 2 Gate 1/2 -> STEP 3 Normality -> STEP 4 Sigma -> STEP 5 IQR -> STEP 6 Finalize -> STEP 7 Model 1.7 -> STEP 8 Model 1.6 -> STEP 9 Model 1.4 -> STEP 10 Model 1.5 -> STEP 11 Model 1.1 -> STEP 12 Model 1.2 -> STEP 13 PBI-11B Assembler -> STEP 14 Model 1.3 SES (PBI-12) -> STEP 15 Save (PBI-12)
+    // ลำดับ: ต่อ DB -> (STEP 0 Ingestion PBI-01 เมื่อระบุ --ingest) -> STEP 1 NetDemand -> STEP 2 Gate 1/2 -> STEP 3 Normality -> STEP 4 Sigma -> STEP 5 IQR -> STEP 6 Finalize -> STEP 7 Model 1.7 -> STEP 8 Model 1.6 -> STEP 9 Model 1.4 -> STEP 10 Model 1.5 -> STEP 11 Model 1.1 -> STEP 12 Model 1.2 -> STEP 13 PBI-11B Assembler -> STEP 14 Model 1.3 SES (PBI-12) -> STEP 15 Save (PBI-12)
     // Argument: --warehouse <รหัสคลัง> (ไม่ใส่ = ทุกคลัง) | --period <yyyyMM> (ไม่ใส่ = งวดล่าสุดใน Staging)
+    //           --ingest <Init|NonInit> (รัน STEP 0 ก่อน: Init = 25 งวดตอน Go-Live, NonInit = งวด M-1 รายเดือน | ไม่ใส่ --period = M-1 เวลาไทย)
+    //           --ingest-only (รันเฉพาะ STEP 0 แล้วจบ ต้องใช้คู่กับ --ingest)
     // Program.cs ควบคุมลำดับขั้นตอนเท่านั้น: สูตรอยู่ใน Engine | งาน SQL อยู่ใน Repository / NetDemandPreprocessor | สรุปผลหน้าจออยู่ใน CleansingPipeline
     // Log: Console + ไฟล์ logs/drp-yyyyMMdd.log | Exit Code: 0 = สำเร็จ, 1 = Argument ผิด, 2 = ประมวลผลล้มเหลว
     // ======================================================================
@@ -23,6 +26,8 @@ namespace DRP_Project
         private static string? targetWarehouseCode = null;   // กรองเฉพาะคลังนี้ (null = ทุกคลัง)
         private static string? targetPeriod = null;          // งวดที่ต้องการประมวลผล รูปแบบ yyyyMM (null = ค่าเริ่มต้นของ NetDemand)
         private static bool isPreviewOnly = false;           // true = ส่งออก CSV ดูผลลัพธ์ก่อน ไม่ลง DB
+        private static string? ingestMode = null;            // Init | NonInit = รัน STEP 0 Ingestion (PBI-01) ก่อน STEP 1 (null = ข้าม)
+        private static bool ingestOnly = false;              // true = รันเฉพาะ STEP 0 แล้วจบโปรแกรม
 
         // Exit Code: ให้ Scheduler (Task Scheduler / SQL Agent) แยกผลการรันได้
         private const int ExitSuccess = 0;
@@ -71,13 +76,29 @@ namespace DRP_Project
             try
             {
                 // Argument ผิดรูปแบบ -> จบโปรแกรม (log ไว้แล้วใน TryParseArgs)
-                if (!TryParseArgs(args)) return ExitArgumentError;   
+                if (!TryParseArgs(args)) return ExitArgumentError;
                 Log.Information("เริ่มประมวลผล Warehouse={Warehouse} Period={Period}", targetWarehouseCode ?? "ALL", targetPeriod ?? "DEFAULT");
 
                 currentStep = "เชื่อมต่อฐานข้อมูล";
                 Log.Information(">>> {Step}", currentStep);
                 // Connection ตัวเดียวใช้ร่วมทุก Step | using ปิดให้อัตโนมัติเมื่อออกจาก try (ทั้งกรณีสำเร็จและเกิด exception)
                 using SqlConnection connection = ConnectData();
+
+                // ===== STEP 0: Ingestion (PBI-01) =====
+                // ดึง Master + ยอดขาย + OOS จากระบบต้นทางลง DRP_MAS_ITEM / DRP_STG_DRP_DEMAND_24M (เฉพาะเมื่อระบุ --ingest)
+                // Transaction เดียว: ล้มเหลว = Rollback ทั้งหมด (Exit Code 2) | สำเร็จแล้วค่อยไป STEP 1 ต่อ
+                if (ingestMode != null)
+                {
+                    currentStep = "STEP 0: Ingestion (PBI-01)";
+                    Log.Information(">>> {Step}", currentStep);
+                    IngestionRunner.Run(connection, ingestMode, targetPeriod, targetWarehouseCode);
+
+                    if (ingestOnly)
+                    {
+                        Log.Information("ประมวลผลเสร็จสิ้น (เฉพาะ Ingestion) ใช้เวลา {Seconds:N1} วินาที", stopwatch.Elapsed.TotalSeconds);
+                        return ExitSuccess;
+                    }
+                }
 
                 // ===== STEP 1: NetDemand Preprocessing =====
                 // เตรียมยอดความต้องการสุทธิรายเดือนลงตาราง DRP_FCT_SKU_MONTHLY_DEMAND_PREP
@@ -250,6 +271,21 @@ namespace DRP_Project
                         return false;
                     }
                 }
+                else if (args[i] == "--ingest" && i + 1 < args.Length)
+                {
+                    // --ingest <Init|NonInit>: รัน STEP 0 Ingestion (Init = 25 งวดตอน Go-Live, NonInit = งวด M-1 รายเดือน)
+                    ingestMode = args[++i];
+                    if (!ingestMode.Equals("Init", StringComparison.OrdinalIgnoreCase) &&
+                        !ingestMode.Equals("NonInit", StringComparison.OrdinalIgnoreCase))
+                    {
+                        Log.Error("--ingest ต้องเป็น Init หรือ NonInit (ได้รับ: {Mode})", ingestMode);
+                        return false;
+                    }
+                }
+                else if (args[i] == "--ingest-only")
+                {
+                    ingestOnly = true;
+                }
                 else if (args[i] == "--preview")
                 {
                     isPreviewOnly = true;
@@ -258,9 +294,15 @@ namespace DRP_Project
                 {
                     // Argument ที่ไม่รู้จัก หรือ flag ที่ขาดค่าตามหลัง -> แจ้งวิธีใช้แล้วจบโปรแกรม
                     Log.Error("ไม่รู้จัก Argument: {Argument}", args[i]);
-                    Log.Information("Usage: NetDemandPreprocessingEngine.exe --warehouse CMPMH --period 202609");
+                    Log.Information("Usage: NetDemandPreprocessingEngine.exe --warehouse CMPMH --period 202609 [--ingest Init|NonInit] [--ingest-only]");
                     return false;
                 }
+            }
+
+            if (ingestOnly && ingestMode == null)
+            {
+                Log.Error("--ingest-only ต้องใช้คู่กับ --ingest <Init|NonInit>");
+                return false;
             }
             return true;
         }

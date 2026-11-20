@@ -1,3 +1,5 @@
+using System.Globalization;
+
 namespace DRP_Project.src.Ingestion;
 
 public class MockDrpIngestionRepository : IDrpIngestionRepository
@@ -26,8 +28,8 @@ public class MockDrpIngestionRepository : IDrpIngestionRepository
     {
         return SourceSalesOrders
             .Where(r => r.DocDate.HasValue &&
-                        string.Compare(r.DocDate.Value.ToString("yyyyMM"), startYearMonth, StringComparison.Ordinal) >= 0 &&
-                        string.Compare(r.DocDate.Value.ToString("yyyyMM"), endYearMonth, StringComparison.Ordinal) <= 0)
+                        string.Compare(r.DocDate.Value.ToString("yyyyMM", CultureInfo.InvariantCulture), startYearMonth, StringComparison.Ordinal) >= 0 &&
+                        string.Compare(r.DocDate.Value.ToString("yyyyMM", CultureInfo.InvariantCulture), endYearMonth, StringComparison.Ordinal) <= 0)
             .ToList();
     }
 
@@ -35,8 +37,8 @@ public class MockDrpIngestionRepository : IDrpIngestionRepository
     {
         return SourcePosSales
             .Where(r => r.DocDate.HasValue &&
-                        string.Compare(r.DocDate.Value.ToString("yyyyMM"), startYearMonth, StringComparison.Ordinal) >= 0 &&
-                        string.Compare(r.DocDate.Value.ToString("yyyyMM"), endYearMonth, StringComparison.Ordinal) <= 0)
+                        string.Compare(r.DocDate.Value.ToString("yyyyMM", CultureInfo.InvariantCulture), startYearMonth, StringComparison.Ordinal) >= 0 &&
+                        string.Compare(r.DocDate.Value.ToString("yyyyMM", CultureInfo.InvariantCulture), endYearMonth, StringComparison.Ordinal) <= 0)
             .ToList();
     }
 
@@ -44,8 +46,8 @@ public class MockDrpIngestionRepository : IDrpIngestionRepository
     {
         return SourceMysqlOos
             .Where(r => r.CreDate.HasValue &&
-                        string.Compare(r.CreDate.Value.ToString("yyyyMM"), startYearMonth, StringComparison.Ordinal) >= 0 &&
-                        string.Compare(r.CreDate.Value.ToString("yyyyMM"), endYearMonth, StringComparison.Ordinal) <= 0)
+                        string.Compare(r.CreDate.Value.ToString("yyyyMM", CultureInfo.InvariantCulture), startYearMonth, StringComparison.Ordinal) >= 0 &&
+                        string.Compare(r.CreDate.Value.ToString("yyyyMM", CultureInfo.InvariantCulture), endYearMonth, StringComparison.Ordinal) <= 0)
             .ToList();
     }
 
@@ -54,18 +56,26 @@ public class MockDrpIngestionRepository : IDrpIngestionRepository
         return MasterItemsTable.ToDictionary(k => k.Key, v => v.Value);
     }
 
+    /// <summary>
+    /// รวม Factor ทุก Company เป็น Dictionary เดียว (Company = 'PMH' ชนะถ้าซ้ำ) ไม่สนตัวพิมพ์
+    /// หมายเหตุ: Engine ไม่เรียกใช้เมธอดนี้แล้ว (คำนวณ Factor แยกตาม Company เองจาก FetchSourceInventTable)
+    /// คงไว้เพื่อความเข้ากันได้ของ Interface/เทสต์เดิมเท่านั้น
+    /// </summary>
     public IReadOnlyDictionary<string, decimal> GetSourceConversionFactors()
     {
-        var dict = new Dictionary<string, decimal>();
+        var dict = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
         foreach (var row in SourceInventTable)
         {
-            if (!string.IsNullOrWhiteSpace(row.ItemId))
-            {
-                var factor = (!row.FactorSalesToBaseUnit.HasValue || row.FactorSalesToBaseUnit.Value <= 0)
-                    ? 1.0m
-                    : row.FactorSalesToBaseUnit.Value;
-                dict[row.ItemId.Trim()] = factor;
-            }
+            if (string.IsNullOrWhiteSpace(row.ItemId)) continue;
+            var cleanItemId = row.ItemId.Trim();
+            var cleanCompany = (row.Company ?? "").Trim().ToUpperInvariant();
+
+            var factor = (!row.FactorSalesToBaseUnit.HasValue || row.FactorSalesToBaseUnit.Value <= 0)
+                ? 1.0m
+                : row.FactorSalesToBaseUnit.Value;
+
+            if (!dict.ContainsKey(cleanItemId) || cleanCompany == "PMH")
+                dict[cleanItemId] = factor;
         }
         return dict;
     }
@@ -73,6 +83,16 @@ public class MockDrpIngestionRepository : IDrpIngestionRepository
     public IReadOnlyList<DrpStgDemand24MRecord> GetExistingStagingRecords()
     {
         return StagingDemand24MTable.ToList();
+    }
+
+    public IReadOnlyDictionary<(string ItemId, string WarehouseCode), decimal> GetHistoricalMaxSales(string startPeriod, string endPeriod)
+    {
+        // เลียนแบบ: SELECT item_id, warehouse_code, MAX(raw_sales_qty) ... WHERE period BETWEEN @s AND @e GROUP BY item_id, warehouse_code
+        return StagingDemand24MTable
+            .Where(r => string.Compare(r.YearMonth, startPeriod, StringComparison.Ordinal) >= 0 &&
+                        string.Compare(r.YearMonth, endPeriod, StringComparison.Ordinal) <= 0)
+            .GroupBy(r => (r.ItemId, r.WarehouseCode))
+            .ToDictionary(g => (ItemId: g.Key.ItemId, WarehouseCode: g.Key.WarehouseCode), g => g.Max(r => r.RawSalesQty));
     }
 
     public void BeginTransaction()
@@ -90,18 +110,13 @@ public class MockDrpIngestionRepository : IDrpIngestionRepository
         }
     }
 
-    public void DeleteStagingScope(string mode, string targetPeriod, string? targetWarehouseCode)
+    public void DeleteStagingScope(string startPeriod, string endPeriod, IReadOnlyCollection<string>? warehouseCodes)
     {
-        if (mode.Equals("Init", StringComparison.OrdinalIgnoreCase))
-        {
-            StagingDemand24MTable.Clear();
-        }
-        else
-        {
-            StagingDemand24MTable.RemoveAll(r =>
-                r.YearMonth == targetPeriod &&
-                (string.IsNullOrEmpty(targetWarehouseCode) || r.WarehouseCode == targetWarehouseCode));
-        }
+        // เลียนแบบ: DELETE ... WHERE period_year_month BETWEEN @start AND @end AND (warehouse IN (...) หรือทุกคลัง)
+        StagingDemand24MTable.RemoveAll(r =>
+            string.Compare(r.YearMonth, startPeriod, StringComparison.Ordinal) >= 0 &&
+            string.Compare(r.YearMonth, endPeriod, StringComparison.Ordinal) <= 0 &&
+            (warehouseCodes == null || warehouseCodes.Contains(r.WarehouseCode)));
     }
 
     public void BulkInsertStaging(IEnumerable<DrpStgDemand24MRecord> records)

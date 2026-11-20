@@ -8,7 +8,7 @@ public static class IngestionTests
     public static void RunAllTests()
     {
         Console.WriteLine("\n========================================================");
-        Console.WriteLine("🧪 RUNNING SUITE: PBI-01 Direct SQL Demand View (TC-01-01 to TC-01-09)");
+        Console.WriteLine("🧪 RUNNING SUITE: PBI-01 Direct SQL Demand View (TC-01-01 to TC-01-25)");
         Console.WriteLine("========================================================");
 
         Test_TC01_01_MasterCatalogSyncAndProductLineNormalization();
@@ -20,9 +20,25 @@ public static class IngestionTests
         Test_TC01_07_Stage0OosSanityCapInInitAndNonInitModes();
         Test_TC01_08_ScopedIdempotencyAndManualOosEditPreservation();
         Test_TC01_09_AtomicTransactionRollbackOnBulkCopyFailure();
+        Test_TC01_10_PosSalesMustNotApplyConversionFactor();
+        Test_TC01_11_NonInitHistoricalWindowBoundaries();
+        Test_TC01_12_InitMustPreserveStagingOutsideWindow();
+        Test_TC01_13_InitWithTargetWarehouseScopesDeleteToThatWarehouse();
+        Test_TC01_14_ActiveWarehousesSubsetScopesDeleteToSubset();
+        Test_TC01_15_UnknownWarehouseCodeIsRejectedBeforeAnyWrite();
+        Test_TC01_16_InvalidModeIsRejected();
+        Test_TC01_17_InvalidPeriodFormatIsRejected();
+        Test_TC01_18_OpenOrFuturePeriodIsRejected();
+        Test_TC01_19_DefaultTargetPeriodIsLatestClosedMonth();
+        Test_TC01_20_EmptyGridMustNotWipeExistingStaging();
+        Test_TC01_21_QuantitiesAreRoundedToFourDecimals();
+        Test_TC01_22_HistoricalMaxIsScopedPerItemAndWarehouse();
+        Test_TC01_23_DefaultPeriodUsesThaiTime();
+        Test_TC01_24_LongItemNameIsTruncatedTo200();
+        Test_TC01_25_SkuMissingFromInventTableIsKeptWithFactorOne();
 
         Console.WriteLine("========================================================");
-        Console.WriteLine("✅ ALL PBI-01 UNIT TESTS PASSED (9/9)");
+        Console.WriteLine("✅ ALL PBI-01 UNIT TESTS PASSED (25/25)");
         Console.WriteLine("========================================================\n");
     }
 
@@ -475,6 +491,405 @@ public static class IngestionTests
         Assert(stagingRecords.Any(record => record.YearMonth == "202608" && record.RawSalesQty == 110.0m), "TC-01-09 Row 202608 must be preserved with original 110.0m");
 
         Console.WriteLine("[PASS] TC-01-09: Atomic Database Transaction Rollback on Bulk Copy Failure");
+    }
+
+    /// <summary>
+    /// TC-01-10: SALESPFN.QTY is already POS Unit -> must NOT be multiplied by FACTOR_SALESTOBASEUNIT
+    /// (PMH/MTW side still converts: covered by TC-01-02 / TC-01-04)
+    /// </summary>
+    public static void Test_TC01_10_PosSalesMustNotApplyConversionFactor()
+    {
+        var repository = new MockDrpIngestionRepository();
+        repository.SourceInventTable.Add(new RawInventTableRow("SKU-POS-F12", "POS Factor Item", "HB", 12.0m));
+        repository.SourcePosSales.Add(new RawPosSalesRow("SKU-POS-F12", DateTime.Parse("2026-08-02"), "B101", "90003", 10.0m));
+
+        new DemandIngestionEngine(repository).ExecuteIngestion(
+            new IngestionJobRequest("NonInit", "202608", TargetWarehouseCode: "RDC-PT (B2C)", ActiveWarehouses: new[] { "RDC-PT (B2C)" }));
+
+        var record = repository.GetExistingStagingRecords().Single(r => r.ItemId == "SKU-POS-F12" && r.WarehouseCode == "RDC-PT (B2C)");
+        Assert(record.RawSalesQty == 10.0000m, $"TC-01-10 PFN qty is POS Unit already, expected 10.0000m (no factor), got {record.RawSalesQty}");
+
+        Console.WriteLine("[PASS] TC-01-10: POS (PFN) sales are not multiplied by conversion factor");
+    }
+
+    /// <summary>
+    /// TC-01-11: NonInit max_hist_sales window = target-23 .. target-1 from Staging (+ current month).
+    /// target 202608 -> 202409..202607 counted; 202408 (target-24) must NOT be counted.
+    /// </summary>
+    public static void Test_TC01_11_NonInitHistoricalWindowBoundaries()
+    {
+        var repository = new MockDrpIngestionRepository();
+        repository.SourceInventTable.Add(new RawInventTableRow("SKU-WIN-NEWEST", "Max at target-1", "HB", 1.0m));
+        repository.SourceInventTable.Add(new RawInventTableRow("SKU-WIN-OLDEST", "Max at target-24", "HB", 1.0m));
+
+        // target-1 (202607) is inside the window -> must be counted
+        repository.StagingDemand24MTable.Add(new DrpStgDemand24MRecord("SKU-WIN-NEWEST", "MDC (B2B)", "202607", 500.0m, 0.0m, DateTime.UtcNow));
+        // target-24 (202408) is outside the window -> must be ignored
+        repository.StagingDemand24MTable.Add(new DrpStgDemand24MRecord("SKU-WIN-OLDEST", "MDC (B2B)", "202408", 700.0m, 0.0m, DateTime.UtcNow));
+
+        repository.SourceSalesOrders.Add(new RawSalesOrderRow("SKU-WIN-NEWEST", DateTime.Parse("2026-08-05"), "Invoice", "WH01", "CUST-01", "DOM", null, 10.0m));
+        repository.SourceSalesOrders.Add(new RawSalesOrderRow("SKU-WIN-OLDEST", DateTime.Parse("2026-08-05"), "Invoice", "WH01", "CUST-01", "DOM", null, 20.0m));
+        repository.SourceMysqlOos.Add(new RawMysqlOosRow("SKU-WIN-NEWEST", DateTime.Parse("2026-08-10"), "CUST-01", "WH01", "DOM", 1000.0m));
+        repository.SourceMysqlOos.Add(new RawMysqlOosRow("SKU-WIN-OLDEST", DateTime.Parse("2026-08-10"), "CUST-01", "WH01", "DOM", 1000.0m));
+
+        new DemandIngestionEngine(repository).ExecuteIngestion(
+            new IngestionJobRequest("NonInit", "202608", "MDC (B2B)", new[] { "MDC (B2B)" }));
+
+        var staging = repository.GetExistingStagingRecords();
+        var newest = staging.Single(r => r.ItemId == "SKU-WIN-NEWEST" && r.YearMonth == "202608");
+        var oldest = staging.Single(r => r.ItemId == "SKU-WIN-OLDEST" && r.YearMonth == "202608");
+
+        Assert(newest.OosLostQty == 500.0000m, $"TC-01-11 202607 (target-1) must be counted: expected cap 500.0000m, got {newest.OosLostQty}");
+        Assert(oldest.OosLostQty == 20.0000m, $"TC-01-11 202408 (target-24) must be ignored: expected cap 20.0000m (current month only), got {oldest.OosLostQty}");
+
+        Console.WriteLine("[PASS] TC-01-11: NonInit historical window boundaries (target-23..target-1)");
+    }
+
+    /// <summary>
+    /// TC-01-12: Init deletes only 202409..202609. Rows outside the window (accumulated history) must survive.
+    /// </summary>
+    public static void Test_TC01_12_InitMustPreserveStagingOutsideWindow()
+    {
+        var repository = new MockDrpIngestionRepository();
+        repository.SourceInventTable.Add(new RawInventTableRow("SKU-INIT", "Init Item", "HB", 1.0m));
+
+        // Outside window (202301): must be preserved with original values (e.g. user-edited OOS)
+        repository.StagingDemand24MTable.Add(new DrpStgDemand24MRecord("SKU-INIT", "MDC (B2B)", "202301", 40.0m, 15.0m, DateTime.Parse("2023-02-01T00:00:00Z")));
+        // Inside window (202501): stale row must be replaced by the dense grid (zero-fill)
+        repository.StagingDemand24MTable.Add(new DrpStgDemand24MRecord("SKU-INIT", "MDC (B2B)", "202501", 999.0m, 0.0m, DateTime.Parse("2025-02-01T00:00:00Z")));
+
+        new DemandIngestionEngine(repository).ExecuteIngestion(new IngestionJobRequest("Init", "202609"));
+
+        var staging = repository.GetExistingStagingRecords();
+        Assert(staging.Count == 251, $"TC-01-12 Expected 251 rows (1 SKU x 10 WH x 25M + 1 preserved), got {staging.Count}");
+
+        var preserved = staging.Single(r => r.WarehouseCode == "MDC (B2B)" && r.YearMonth == "202301");
+        Assert(preserved.RawSalesQty == 40.0000m && preserved.OosLostQty == 15.0000m, "TC-01-12 Row outside Init window must be preserved untouched");
+
+        var replaced = staging.Single(r => r.WarehouseCode == "MDC (B2B)" && r.YearMonth == "202501");
+        Assert(replaced.RawSalesQty == 0.0000m, $"TC-01-12 Row inside Init window must be replaced (expected 0.0000m), got {replaced.RawSalesQty}");
+
+        Console.WriteLine("[PASS] TC-01-12: Init deletes only its 25-month window");
+    }
+
+    /// <summary>
+    /// TC-01-13: Init with TargetWarehouseCode replaces all 25 months of that warehouse only.
+    /// </summary>
+    public static void Test_TC01_13_InitWithTargetWarehouseScopesDeleteToThatWarehouse()
+    {
+        var repository = new MockDrpIngestionRepository();
+        repository.SourceInventTable.Add(new RawInventTableRow("SKU-INIT-WH", "Init WH Item", "HB", 1.0m));
+
+        repository.StagingDemand24MTable.Add(new DrpStgDemand24MRecord("SKU-INIT-WH", "MDC (B2B)", "202501", 999.0m, 0.0m, DateTime.UtcNow));
+        repository.StagingDemand24MTable.Add(new DrpStgDemand24MRecord("SKU-INIT-WH", "RDC-CM (B2B)", "202501", 77.0m, 0.0m, DateTime.UtcNow));
+
+        new DemandIngestionEngine(repository).ExecuteIngestion(
+            new IngestionJobRequest("Init", "202609", TargetWarehouseCode: "MDC (B2B)"));
+
+        var staging = repository.GetExistingStagingRecords();
+        // MDC (B2B): 25 rows exactly (no duplicate of 202501) + RDC-CM (B2B): 1 untouched row
+        Assert(staging.Count(r => r.WarehouseCode == "MDC (B2B)") == 25, "TC-01-13 MDC (B2B) must have exactly 25 rows (no PK duplicate)");
+        var other = staging.Single(r => r.WarehouseCode == "RDC-CM (B2B)");
+        Assert(other.RawSalesQty == 77.0000m, "TC-01-13 Other warehouse must remain untouched");
+
+        Console.WriteLine("[PASS] TC-01-13: Init with TargetWarehouseCode only touches that warehouse");
+    }
+
+    /// <summary>
+    /// TC-01-14: ActiveWarehouses subset (TargetWarehouseCode = null): delete scope == insert scope.
+    /// </summary>
+    public static void Test_TC01_14_ActiveWarehousesSubsetScopesDeleteToSubset()
+    {
+        var repository = new MockDrpIngestionRepository();
+        repository.SourceInventTable.Add(new RawInventTableRow("SKU-SUBSET", "Subset Item", "HB", 1.0m));
+
+        repository.StagingDemand24MTable.Add(new DrpStgDemand24MRecord("SKU-SUBSET", "RDC-CM (B2B)", "202608", 50.0m, 0.0m, DateTime.UtcNow));
+        repository.StagingDemand24MTable.Add(new DrpStgDemand24MRecord("SKU-SUBSET", "MDC (B2B)", "202608", 120.0m, 0.0m, DateTime.UtcNow));
+
+        new DemandIngestionEngine(repository).ExecuteIngestion(
+            new IngestionJobRequest("NonInit", "202608", TargetWarehouseCode: null, ActiveWarehouses: new[] { "MDC (B2B)" }));
+
+        var staging = repository.GetExistingStagingRecords();
+        Assert(staging.Count == 2, $"TC-01-14 Expected 2 rows, got {staging.Count}");
+        Assert(staging.Single(r => r.WarehouseCode == "RDC-CM (B2B)").RawSalesQty == 50.0000m, "TC-01-14 Warehouse outside ActiveWarehouses must not be deleted");
+        Assert(staging.Single(r => r.WarehouseCode == "MDC (B2B)").RawSalesQty == 0.0000m, "TC-01-14 Warehouse in ActiveWarehouses must be replaced");
+
+        Console.WriteLine("[PASS] TC-01-14: ActiveWarehouses subset scopes the delete");
+    }
+
+    /// <summary>
+    /// TC-01-15: Unknown warehouse code must be rejected before any write (no junk rows, nothing deleted).
+    /// </summary>
+    public static void Test_TC01_15_UnknownWarehouseCodeIsRejectedBeforeAnyWrite()
+    {
+        var repository = new MockDrpIngestionRepository();
+        repository.SourceInventTable.Add(new RawInventTableRow("SKU-BAD-WH", "Bad WH Item", "HB", 1.0m));
+        repository.StagingDemand24MTable.Add(new DrpStgDemand24MRecord("SKU-BAD-WH", "MDC (B2B)", "202608", 120.0m, 0.0m, DateTime.UtcNow));
+
+        bool thrown = false;
+        try
+        {
+            new DemandIngestionEngine(repository).ExecuteIngestion(
+                new IngestionJobRequest("NonInit", "202608", TargetWarehouseCode: "NOT-A-WAREHOUSE"));
+        }
+        catch (ArgumentException)
+        {
+            thrown = true;
+        }
+
+        Assert(thrown, "TC-01-15 Expected ArgumentException for unknown warehouse code");
+        Assert(repository.GetExistingStagingRecords().Count == 1 && repository.MasterItemsTable.Count == 0,
+            "TC-01-15 No write may happen when the request is rejected");
+
+        Console.WriteLine("[PASS] TC-01-15: Unknown warehouse code is rejected before any write");
+    }
+
+    // เวลารันคงที่สำหรับ Test ชุดนี้: M-1 = 202608 (ไม่ขึ้นกับวันที่จริงของเครื่อง)
+    private static readonly DateTime AsOfSeptember2026 = new DateTime(2026, 9, 15, 0, 0, 0, DateTimeKind.Utc);
+
+    /// <summary>
+    /// TC-01-16: Mode ต้องเป็น 'Init' หรือ 'NonInit' เท่านั้น (พิมพ์ผิดต้อง throw ไม่ตกไปเป็น NonInit เงียบๆ)
+    /// </summary>
+    public static void Test_TC01_16_InvalidModeIsRejected()
+    {
+        var repository = new MockDrpIngestionRepository();
+        repository.SourceInventTable.Add(new RawInventTableRow("SKU-MODE", "Mode Item", "HB", 1.0m));
+        repository.StagingDemand24MTable.Add(new DrpStgDemand24MRecord("SKU-MODE", "MDC (B2B)", "202608", 10.0m, 0.0m, DateTime.UtcNow));
+
+        bool thrown = false;
+        try
+        {
+            new DemandIngestionEngine(repository).ExecuteIngestion(
+                new IngestionJobRequest("Intt", "202608", ExecutionTimestamp: AsOfSeptember2026));
+        }
+        catch (ArgumentException) { thrown = true; }
+
+        Assert(thrown, "TC-01-16 Expected ArgumentException for unknown mode");
+        Assert(repository.GetExistingStagingRecords().Count == 1 && repository.MasterItemsTable.Count == 0, "TC-01-16 No write may happen when the request is rejected");
+
+        Console.WriteLine("[PASS] TC-01-16: Invalid mode is rejected");
+    }
+
+    /// <summary>
+    /// TC-01-17: TargetPeriod ต้องเป็น yyyyMM ที่ถูกต้อง (ทั้งโหมด NonInit และ Init)
+    /// </summary>
+    public static void Test_TC01_17_InvalidPeriodFormatIsRejected()
+    {
+        var repository = new MockDrpIngestionRepository();
+        repository.SourceInventTable.Add(new RawInventTableRow("SKU-FMT", "Format Item", "HB", 1.0m));
+
+        foreach (var mode in new[] { "NonInit", "Init" })
+        {
+            foreach (var badPeriod in new[] { "2026-08", "202613", "20268", "abcdef", "202600" })
+            {
+                bool thrown = false;
+                try
+                {
+                    new DemandIngestionEngine(repository).ExecuteIngestion(
+                        new IngestionJobRequest(mode, badPeriod, ExecutionTimestamp: AsOfSeptember2026));
+                }
+                catch (ArgumentException) { thrown = true; }
+
+                Assert(thrown, $"TC-01-17 Expected ArgumentException for mode={mode}, period='{badPeriod}'");
+            }
+        }
+
+        Assert(repository.GetExistingStagingRecords().Count == 0 && repository.MasterItemsTable.Count == 0, "TC-01-17 No write may happen when the request is rejected");
+
+        Console.WriteLine("[PASS] TC-01-17: Invalid period format is rejected");
+    }
+
+    /// <summary>
+    /// TC-01-18: Strict Closed Calendar Month: งวดปัจจุบันและอนาคตต้องถูกปฏิเสธ (as-of 2026-09-15 -> ใช้ได้ถึง 202608)
+    /// </summary>
+    public static void Test_TC01_18_OpenOrFuturePeriodIsRejected()
+    {
+        var repository = new MockDrpIngestionRepository();
+        repository.SourceInventTable.Add(new RawInventTableRow("SKU-CLOSED", "Closed Period Item", "HB", 1.0m));
+
+        foreach (var openPeriod in new[] { "202609", "202610" })
+        {
+            bool thrown = false;
+            try
+            {
+                new DemandIngestionEngine(repository).ExecuteIngestion(
+                    new IngestionJobRequest("NonInit", openPeriod, ExecutionTimestamp: AsOfSeptember2026));
+            }
+            catch (ArgumentException) { thrown = true; }
+
+            Assert(thrown, $"TC-01-18 Expected ArgumentException for open/future period {openPeriod}");
+        }
+        Assert(repository.GetExistingStagingRecords().Count == 0, "TC-01-18 No write may happen when the request is rejected");
+
+        // งวด M-1 (202608) ต้องผ่าน
+        new DemandIngestionEngine(repository).ExecuteIngestion(
+            new IngestionJobRequest("NonInit", "202608", ExecutionTimestamp: AsOfSeptember2026));
+        Assert(repository.GetExistingStagingRecords().Count == 10, "TC-01-18 Closed period 202608 must be accepted (1 SKU x 10 WH)");
+
+        Console.WriteLine("[PASS] TC-01-18: Open/future period is rejected, M-1 accepted");
+    }
+
+    /// <summary>
+    /// TC-01-19: ไม่ระบุ TargetPeriod -> Default = M-1 (เดือนก่อนหน้าของเวลารัน)
+    /// </summary>
+    public static void Test_TC01_19_DefaultTargetPeriodIsLatestClosedMonth()
+    {
+        var repository = new MockDrpIngestionRepository();
+        repository.SourceInventTable.Add(new RawInventTableRow("SKU-DEFAULT", "Default Period Item", "HB", 1.0m));
+        repository.SourceSalesOrders.Add(new RawSalesOrderRow("SKU-DEFAULT", DateTime.Parse("2026-08-10"), "Invoice", "WH01", "CUST-01", "DOM", null, 7.0m));
+
+        new DemandIngestionEngine(repository).ExecuteIngestion(
+            new IngestionJobRequest("NonInit", null, ExecutionTimestamp: AsOfSeptember2026));
+
+        var staging = repository.GetExistingStagingRecords();
+        Assert(staging.Count == 10 && staging.All(r => r.YearMonth == "202608"), "TC-01-19 Default period must be 202608 for all rows");
+        Assert(staging.Single(r => r.WarehouseCode == "MDC (B2B)").RawSalesQty == 7.0000m, "TC-01-19 Sales of 202608 must be ingested");
+
+        Console.WriteLine("[PASS] TC-01-19: Default TargetPeriod = M-1");
+    }
+
+    /// <summary>
+    /// TC-01-20: Guard กันล้างตาราง: ถ้าไม่มีแถวให้เขียนเลย (Master ว่าง) ต้องหยุดก่อนลบข้อมูลเดิม
+    /// </summary>
+    public static void Test_TC01_20_EmptyGridMustNotWipeExistingStaging()
+    {
+        var repository = new MockDrpIngestionRepository();
+        repository.StagingDemand24MTable.Add(new DrpStgDemand24MRecord("SKU-LEGACY", "MDC (B2B)", "202608", 120.0m, 5.0m, DateTime.UtcNow));
+
+        bool thrown = false;
+        try
+        {
+            new DemandIngestionEngine(repository).ExecuteIngestion(
+                new IngestionJobRequest("NonInit", "202608", ExecutionTimestamp: AsOfSeptember2026));
+        }
+        catch (InvalidOperationException) { thrown = true; }
+
+        Assert(thrown, "TC-01-20 Expected InvalidOperationException when there is nothing to write");
+        Assert(repository.GetExistingStagingRecords().Count == 1, "TC-01-20 Existing staging row must NOT be deleted");
+
+        Console.WriteLine("[PASS] TC-01-20: Empty grid does not wipe existing staging");
+    }
+
+    /// <summary>
+    /// TC-01-21: ปัดเศษ 4 ตำแหน่ง (NUMERIC(38,4)) หลังรวมยอด: 1 x 1.23456 = 1.2346 (Sales และ OOS)
+    /// </summary>
+    public static void Test_TC01_21_QuantitiesAreRoundedToFourDecimals()
+    {
+        var repository = new MockDrpIngestionRepository();
+        repository.SourceInventTable.Add(new RawInventTableRow("SKU-ROUND", "Rounding Item", "HB", 1.23456m));
+        repository.SourceSalesOrders.Add(new RawSalesOrderRow("SKU-ROUND", DateTime.Parse("2026-08-10"), "Invoice", "WH01", "CUST-01", "DOM", null, 1.0m));
+        repository.SourceMysqlOos.Add(new RawMysqlOosRow("SKU-ROUND", DateTime.Parse("2026-08-12"), "CUST-01", "WH01", "DOM", 1.0m));
+
+        new DemandIngestionEngine(repository).ExecuteIngestion(
+            new IngestionJobRequest("NonInit", "202608", "MDC (B2B)", new[] { "MDC (B2B)" }, AsOfSeptember2026));
+
+        var record = repository.GetExistingStagingRecords().Single(r => r.ItemId == "SKU-ROUND");
+        Assert(record.RawSalesQty == 1.2346m, $"TC-01-21 Sales expected 1.2346m, got {record.RawSalesQty}");
+        Assert(record.OosLostQty == 1.2346m, $"TC-01-21 OOS expected 1.2346m, got {record.OosLostQty}");
+
+        Console.WriteLine("[PASS] TC-01-21: Quantities are rounded to 4 decimals");
+    }
+
+    /// <summary>
+    /// TC-01-22: เพดาน OOS ใช้ max ของ (SKU, คลัง) นั้นๆ เท่านั้น ไม่ปนข้าม SKU หรือข้ามคลัง
+    /// (regression ของการเปลี่ยนไปใช้ GetHistoricalMaxSales ที่ GROUP BY ตาม item_id + warehouse_code)
+    /// </summary>
+    public static void Test_TC01_22_HistoricalMaxIsScopedPerItemAndWarehouse()
+    {
+        var repository = new MockDrpIngestionRepository();
+        repository.SourceInventTable.Add(new RawInventTableRow("SKU-A", "Item A", "HB", 1.0m));
+        repository.SourceInventTable.Add(new RawInventTableRow("SKU-B", "Item B", "HB", 1.0m));
+
+        repository.StagingDemand24MTable.Add(new DrpStgDemand24MRecord("SKU-A", "MDC (B2B)", "202511", 300.0m, 0.0m, DateTime.UtcNow));
+        repository.StagingDemand24MTable.Add(new DrpStgDemand24MRecord("SKU-A", "RDC-CM (B2B)", "202511", 50.0m, 0.0m, DateTime.UtcNow));
+        repository.StagingDemand24MTable.Add(new DrpStgDemand24MRecord("SKU-B", "MDC (B2B)", "202511", 90.0m, 0.0m, DateTime.UtcNow));
+
+        foreach (var item in new[] { "SKU-A", "SKU-B" })
+        {
+            repository.SourceMysqlOos.Add(new RawMysqlOosRow(item, DateTime.Parse("2026-08-10"), "CUST-01", "WH01", "DOM", 1000.0m));
+            repository.SourceMysqlOos.Add(new RawMysqlOosRow(item, DateTime.Parse("2026-08-10"), "CUST-02", "WHCM01", "DOMCM", 1000.0m));
+        }
+
+        new DemandIngestionEngine(repository).ExecuteIngestion(
+            new IngestionJobRequest("NonInit", "202608", TargetWarehouseCode: null,
+                ActiveWarehouses: new[] { "MDC (B2B)", "RDC-CM (B2B)" }, ExecutionTimestamp: AsOfSeptember2026));
+
+        var target = repository.GetExistingStagingRecords().Where(r => r.YearMonth == "202608").ToList();
+        decimal Oos(string item, string wh) => target.Single(r => r.ItemId == item && r.WarehouseCode == wh).OosLostQty;
+
+        Assert(Oos("SKU-A", "MDC (B2B)") == 300.0000m, $"TC-01-22 SKU-A/MDC expected 300.0000m, got {Oos("SKU-A", "MDC (B2B)")}");
+        Assert(Oos("SKU-A", "RDC-CM (B2B)") == 50.0000m, $"TC-01-22 SKU-A/RDC-CM expected 50.0000m, got {Oos("SKU-A", "RDC-CM (B2B)")}");
+        Assert(Oos("SKU-B", "MDC (B2B)") == 90.0000m, $"TC-01-22 SKU-B/MDC expected 90.0000m, got {Oos("SKU-B", "MDC (B2B)")}");
+        Assert(Oos("SKU-B", "RDC-CM (B2B)") == 0.0000m, $"TC-01-22 SKU-B/RDC-CM never sold -> expected 0.0000m, got {Oos("SKU-B", "RDC-CM (B2B)")}");
+
+        Console.WriteLine("[PASS] TC-01-22: Historical max is scoped per (item, warehouse)");
+    }
+
+    /// <summary>
+    /// TC-01-23: Default TargetPeriod (M-1) คิดจากเวลาไทย (UTC+7) ไม่ใช่เวลา UTC
+    /// 2026-09-30 20:00 UTC = 2026-10-01 03:00 ไทย -> M-1 = 202609 | 2026-09-30 16:00 UTC = 2026-09-30 23:00 ไทย -> M-1 = 202608
+    /// </summary>
+    public static void Test_TC01_23_DefaultPeriodUsesThaiTime()
+    {
+        AssertDefaultPeriod(new DateTime(2026, 9, 30, 20, 0, 0, DateTimeKind.Utc), "202609");
+        AssertDefaultPeriod(new DateTime(2026, 9, 30, 16, 0, 0, DateTimeKind.Utc), "202608");
+
+        Console.WriteLine("[PASS] TC-01-23: Default M-1 uses Thai time (UTC+7)");
+    }
+
+    private static void AssertDefaultPeriod(DateTime executionUtc, string expectedPeriod)
+    {
+        var repository = new MockDrpIngestionRepository();
+        repository.SourceInventTable.Add(new RawInventTableRow("SKU-TZ", "Thai Time Item", "HB", 1.0m));
+
+        new DemandIngestionEngine(repository).ExecuteIngestion(
+            new IngestionJobRequest("NonInit", null, ExecutionTimestamp: executionUtc));
+
+        var staging = repository.GetExistingStagingRecords();
+        Assert(staging.Count == 10 && staging.All(r => r.YearMonth == expectedPeriod),
+            $"TC-01-23 execution {executionUtc:yyyy-MM-dd HH:mm} UTC expected default period {expectedPeriod}");
+    }
+
+    /// <summary>
+    /// TC-01-24: ITEMNAME ยาวเกิน 200 ตัวอักษร (item_name = NVARCHAR(200)) ต้องถูกตัดให้พอดี ไม่ให้ Upsert ล้มทั้งงาน
+    /// </summary>
+    public static void Test_TC01_24_LongItemNameIsTruncatedTo200()
+    {
+        var repository = new MockDrpIngestionRepository();
+        repository.SourceInventTable.Add(new RawInventTableRow("SKU-LONG", new string('A', 250), "HB", 1.0m));
+
+        new DemandIngestionEngine(repository).ExecuteIngestion(
+            new IngestionJobRequest("NonInit", "202608", ExecutionTimestamp: AsOfSeptember2026));
+
+        Assert(repository.MasterItemsTable["SKU-LONG"].ItemName.Length == 200,
+            $"TC-01-24 item_name must be truncated to 200 chars, got {repository.MasterItemsTable["SKU-LONG"].ItemName.Length}");
+
+        Console.WriteLine("[PASS] TC-01-24: Item name longer than 200 chars is truncated");
+    }
+
+    /// <summary>
+    /// TC-01-25: SKU ที่มีใน DRP_MAS_ITEM แต่หายจาก INVENTTABLE: เก็บไว้ไม่ลบ และใช้ Factor 1.0 (ยืนยันกับทีมแล้ว)
+    /// </summary>
+    public static void Test_TC01_25_SkuMissingFromInventTableIsKeptWithFactorOne()
+    {
+        var repository = new MockDrpIngestionRepository();
+        var oldStamp = new DateTime(2024, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        repository.MasterItemsTable["SKU-LEGACY"] = new DrpMasItemRecord("SKU-LEGACY", "Legacy Item", "YP", oldStamp);
+        repository.SourceInventTable.Add(new RawInventTableRow("SKU-NEW", "New Item", "HB", 2.0m));
+        repository.SourceSalesOrders.Add(new RawSalesOrderRow("SKU-LEGACY", DateTime.Parse("2026-08-10"), "Invoice", "WH01", "C001", "DOM", null, 7.0m));
+
+        new DemandIngestionEngine(repository).ExecuteIngestion(
+            new IngestionJobRequest("NonInit", "202608", "MDC (B2B)", new[] { "MDC (B2B)" }, AsOfSeptember2026));
+
+        Assert(repository.MasterItemsTable.ContainsKey("SKU-LEGACY") &&
+               repository.MasterItemsTable["SKU-LEGACY"].ItemName == "Legacy Item" &&
+               repository.MasterItemsTable["SKU-LEGACY"].UpdatedAt == oldStamp,
+            "TC-01-25 SKU missing from INVENTTABLE must be kept untouched in DRP_MAS_ITEM");
+
+        var legacy = repository.GetExistingStagingRecords().Single(r => r.ItemId == "SKU-LEGACY" && r.WarehouseCode == "MDC (B2B)");
+        Assert(legacy.RawSalesQty == 7.0000m, $"TC-01-25 Factor must fall back to 1.0 (expected 7.0000m), got {legacy.RawSalesQty}");
+
+        Console.WriteLine("[PASS] TC-01-25: SKU missing from INVENTTABLE is kept, Factor falls back to 1.0");
     }
 
     private static void Assert(bool condition, string message)

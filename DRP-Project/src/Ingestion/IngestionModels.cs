@@ -4,7 +4,10 @@ public record RawInventTableRow(
     string? ItemId,
     string? ItemName,
     string? ProductLine,
-    decimal? FactorSalesToBaseUnit
+    decimal? FactorSalesToBaseUnit,
+    string? Company = "PMH"   // "PMH" หรือ "PFN" (INVENTTABLE เป็น Multi-Company: ITEMID เดียวกันมีได้หลายแถวคนละ Company
+                              // พร้อม Factor คนละค่า ตามคำยืนยันของ SA: SALESORDER -> ใช้ Factor ฝั่ง PMH, SALESPFN -> ใช้ฝั่ง PFN)
+                              // Default = "PMH": Test เดิม/ข้อมูลที่ไม่ได้ระบุ Company ถือเป็นฝั่ง PMH โดยปริยาย (ไม่ต้องแก้ Test ที่มีอยู่)
 );
 
 public record RawSalesOrderRow(

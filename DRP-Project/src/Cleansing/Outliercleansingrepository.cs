@@ -9,6 +9,11 @@ namespace DRP_Project.src.Cleansing
     // DB I/O เท่านั้น ไม่มี Business Logic (การคำนวณอยู่ใน Engine) | log เฉพาะ Warning ของข้อมูล ไม่ catch Exception
     public static class OutlierCleansingRepository
     {
+        // Default SqlCommand/SqlBulkCopy Timeout = 30 วินาที ไม่พอสำหรับตาราง DRP_FCT_SKU_MONTHLY_DEMAND_PREP /
+        // DRP_FCT_SKU_OUTLIER_CLEANSING ที่มีหลักล้านแถว (เช่นเดียวกับ CommandTimeoutSeconds ใน SqlDrpIngestionRepository)
+        private const int CommandTimeoutSeconds = 1800;
+        private const int BulkChunkSize = 100_000;   // จำกัดขนาดต่อก้อนที่ SqlBulkCopy ส่งจริง (กัน Lock/Memory ก้อนเดียวใหญ่เกิน)
+
         // อ่านค่าตัวเลขจาก M_LOV (LOV_CODE_1 = 'DRP_CONFIG', LOV_CODE_2 = lovCode2, REC_STATUS = 'A' หรือ NULL)
         // ไม่พบแถวหรือแปลงค่าไม่ได้ -> บันทึก Warning ลง log แล้วใช้ defaultValue
         public static decimal LoadLovDecimal(SqlConnection connection, string lovCode2, decimal defaultValue)
@@ -20,7 +25,7 @@ namespace DRP_Project.src.Cleansing
 				  AND LOV_CODE_2 = @LovCode2
 				  AND (REC_STATUS = 'A' OR REC_STATUS IS NULL);";
 
-            using SqlCommand cmd = new SqlCommand(sql, connection);
+            using SqlCommand cmd = new SqlCommand(sql, connection) { CommandTimeout = CommandTimeoutSeconds };
             cmd.Parameters.AddWithValue("@LovCode2", lovCode2);
             object? result = cmd.ExecuteScalar();
 
@@ -59,7 +64,7 @@ namespace DRP_Project.src.Cleansing
             // สร้าง Dictionary เพื่อเก็บข้อมูล SKU และปริมาณความต้องการ 24 เดือน จาก Query
             var map = new Dictionary<string, SkuCleansingCandidate>();
 
-            using SqlCommand cmd = new SqlCommand(sql, connection);
+            using SqlCommand cmd = new SqlCommand(sql, connection) { CommandTimeout = CommandTimeoutSeconds };
 
             // กำหนดค่า Parameter สำหรับ TargetWarehouseCode
             cmd.Parameters.AddWithValue("@TargetWarehouseCode", (object?)targetWarehouseCode ?? DBNull.Value);
@@ -117,6 +122,7 @@ namespace DRP_Project.src.Cleansing
         public static Dictionary<int, string> LoadPeriodMap(SqlConnection connection, string? targetWarehouseCode)
         {
             // ผลลัพธ์ควรมี 24 แถว (month_no 1..24) | DISTINCT เพราะตารางต้นทางมีหลายแถวต่อ SKU ที่ month_no เดียวกัน
+            // ตารางต้นทางมีหลักล้านแถว: DISTINCT ทั้งตารางใช้เวลานาน ต้องตั้ง CommandTimeout ให้พอ (ไม่ใช่ default 30 วิ)
             string query = @"
                 SELECT DISTINCT month_no, period_year_month
                 FROM DRP_FCT_SKU_MONTHLY_DEMAND_PREP
@@ -125,7 +131,7 @@ namespace DRP_Project.src.Cleansing
 
             var periodMap = new Dictionary<int, string>();
 
-            using SqlCommand command = new SqlCommand(query, connection);
+            using SqlCommand command = new SqlCommand(query, connection) { CommandTimeout = CommandTimeoutSeconds };
             command.Parameters.AddWithValue("@pTargetWarehouseCode", (object?)targetWarehouseCode ?? DBNull.Value);
 
             using SqlDataReader reader = command.ExecuteReader();
@@ -158,7 +164,7 @@ namespace DRP_Project.src.Cleansing
                 ? $"TRUNCATE TABLE {targetTable};"
                 : $"DELETE FROM {targetTable} WHERE warehouse_code = @pWarehouse;";
 
-            using (SqlCommand deleteCommand = new SqlCommand(deleteSql, connection, transaction))
+            using (SqlCommand deleteCommand = new SqlCommand(deleteSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
             {
                 if (targetWarehouseCode is not null)
                     deleteCommand.Parameters.AddWithValue("@pWarehouse", targetWarehouseCode);
@@ -166,9 +172,12 @@ namespace DRP_Project.src.Cleansing
             }
 
             // 4) เขียนข้อมูลใหม่ทั้งหมดแบบ Bulk (ชื่อคอลัมน์ต้นทาง = ปลายทาง)
+            // BulkCopyTimeout default = 30 วิ ไม่พอสำหรับหลักล้านแถว | BatchSize จำกัดขนาดต่อก้อนที่ส่งจริงแต่ละรอบ (กัน Lock ก้อนเดียวใหญ่เกิน)
             using (SqlBulkCopy bulkCopy = new SqlBulkCopy(connection, SqlBulkCopyOptions.Default, transaction))
             {
                 bulkCopy.DestinationTableName = targetTable;
+                bulkCopy.BulkCopyTimeout = CommandTimeoutSeconds;
+                bulkCopy.BatchSize = BulkChunkSize;
                 bulkCopy.ColumnMappings.Add("warehouse_code", "warehouse_code");
                 bulkCopy.ColumnMappings.Add("item_id", "item_id");
                 bulkCopy.ColumnMappings.Add("month_no", "month_no");

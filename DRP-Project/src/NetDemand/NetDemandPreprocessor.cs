@@ -8,6 +8,11 @@ namespace DRP_Project.src.NetDemand
     // Net Demand = ยอดขายที่ปรับแล้ว + ยอดที่เสียไปจากสินค้าหมด (OOS Uplift) | ช่วงข้อมูล 24 เดือนล่าสุด
     public static class NetDemandPreprocessor
     {
+        // Default ของ SqlCommand และ SqlBulkCopy = 30 วินาที ไม่พอสำหรับข้อมูล SKU x 24 งวดระดับล้านแถว -> "Execution Timeout Expired"
+        // คำสั่งอ่าน/ลบ: 600 วินาที (ถ้าถูก Lock บล็อกจะ error ให้เห็นภายใน 10 นาที ไม่ค้างตลอดไป) | Bulk Insert: 0 = ไม่จำกัด (เหมือน ForecastResultRepository)
+        private const int CommandTimeoutSeconds = 600;
+        private const int BulkCopyBatchSize = 10000;
+
         public record DemandResult(
             decimal AdjustedSalesQty,
             decimal OosUpliftQty,
@@ -84,6 +89,7 @@ namespace DRP_Project.src.NetDemand
 
             DataTable table = new DataTable();
             using SqlCommand command = new SqlCommand(query, connection);
+            command.CommandTimeout = CommandTimeoutSeconds;
             command.Parameters.AddWithValue("@pTargetPeriod", (object?)targetPeriod ?? DBNull.Value);
             command.Parameters.AddWithValue("@pTargetWarehouseCode", (object?)targetWarehouseCode ?? DBNull.Value);
 
@@ -139,6 +145,7 @@ namespace DRP_Project.src.NetDemand
 
             using (SqlCommand deleteCommand = new SqlCommand(deleteSql, connection, transaction))
             {
+                deleteCommand.CommandTimeout = CommandTimeoutSeconds;
                 if (targetWarehouseCode is not null)
                     deleteCommand.Parameters.AddWithValue("@pWarehouse", targetWarehouseCode);
                 deleteCommand.ExecuteNonQuery();
@@ -148,6 +155,8 @@ namespace DRP_Project.src.NetDemand
             using (SqlBulkCopy bulkCopy = new SqlBulkCopy(connection, SqlBulkCopyOptions.Default, transaction))
             {
                 bulkCopy.DestinationTableName = targetTable;
+                bulkCopy.BulkCopyTimeout = 0;
+                bulkCopy.BatchSize = BulkCopyBatchSize;
                 bulkCopy.ColumnMappings.Add("warehouse_code", "warehouse_code");
                 bulkCopy.ColumnMappings.Add("item_id", "item_id");
                 bulkCopy.ColumnMappings.Add("month_no", "month_no");

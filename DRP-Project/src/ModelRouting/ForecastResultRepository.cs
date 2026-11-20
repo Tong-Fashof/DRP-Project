@@ -34,10 +34,10 @@ namespace DRP_Project.src.ModelRouting
             ("raw_avg", typeof(decimal), r => r.RawAvg),
             ("raw_sd", typeof(decimal), r => r.RawSd),
             ("raw_cv", typeof(decimal), r => r.RawCv),
-            ("sigma_used", typeof(int), r => r.SigmaUsed ?? 0),
+            ("sigma_used", typeof(int), r => (object?)r.SigmaUsed),   // null -> DBNull (CK_ROUTING_SIGMA_USED ไม่ยอมรับ 0)
             ("raw_ttl_mth", typeof(int), r => r.RawTtlMth),
             ("raw_active_mth", typeof(int), r => r.RawActiveMth),
-            ("raw_adi", typeof(decimal), r => r.RawAdi ?? 0m),
+            ("raw_adi", typeof(decimal), r => (object?)r.RawAdi),
             ("raw_skewness", typeof(decimal), r => r.RawSkewness),
             ("raw_kurtosis", typeof(decimal), r => r.RawKurtosis),
             ("jb_statistic", typeof(decimal), r => r.JbStatistic),
@@ -86,12 +86,12 @@ namespace DRP_Project.src.ModelRouting
             // กลุ่ม 8: Clean Stats & Behavior (11 คอลัมน์)
             ("clean_ttl_mth", typeof(int), r => r.CleanTtlMth),
             ("clean_active_mth", typeof(int), r => r.CleanActiveMth),
-            ("clean_adi", typeof(decimal), r => r.CleanAdi ?? 0m),
+            ("clean_adi", typeof(decimal), r => (object?)r.CleanAdi),
             ("clean_mean", typeof(decimal), r => r.CleanMean),
             ("clean_sd", typeof(decimal), r => r.CleanSd),
             ("clean_cv", typeof(decimal), r => r.CleanCv),
             ("clean_cv2", typeof(decimal), r => r.CleanCv2),
-            ("detect_trend", typeof(string), r => FormatVarchar(r.DetectTrend)),
+            ("detect_trend", typeof(decimal), r => (object?)r.DetectTrend),   // DB = NUMERIC(18,4) NULL
             ("clean_detrended_seasonal_r", typeof(decimal), r => r.CleanDetrendedSeasonalR),
             ("demand_group", typeof(string), r => r.DemandGroup),
             ("demand_pattern", typeof(string), r => r.DemandPattern),
@@ -115,8 +115,6 @@ namespace DRP_Project.src.ModelRouting
             ("calculated_at", typeof(DateTime), r => r.CalculatedAt),
             ("created_at", typeof(DateTime), r => r.CreatedAt),
         };
-
-        private static string FormatVarchar(decimal? value) => value.HasValue ? value.Value.ToString("0.0000", CultureInfo.InvariantCulture) : "";
 
         // ตรวจสอบ Schema ของ DataTable กับตารางจริงใน DB ก่อนบันทึก (ไม่ตรงกัน = throw)
         public static void ValidateSchema(SqlConnection connection, DataTable resultData)
@@ -206,7 +204,7 @@ namespace DRP_Project.src.ModelRouting
             }
 
             // 2) Bulk Insert 72 คอลัมน์
-            using (SqlBulkCopy bulk = new SqlBulkCopy(connection, SqlBulkCopyOptions.Default, transaction))
+            using (SqlBulkCopy bulk = new SqlBulkCopy(connection, SqlBulkCopyOptions.CheckConstraints | SqlBulkCopyOptions.FireTriggers, transaction))
             {
                 bulk.DestinationTableName = ResultTable;
                 bulk.BulkCopyTimeout = 0;
@@ -215,7 +213,11 @@ namespace DRP_Project.src.ModelRouting
             }
 
             // 3) ซิงค์ outlier_status: Bulk ลง #temp แล้ว UPDATE JOIN (COLLATE DATABASE_DEFAULT กัน Collation Conflict กับ tempdb)
+            // #temp อยู่ถึงสิ้นสุด Session (Connection เดียวกัน) ไม่ใช่สิ้นสุด Transaction/การเรียก Save
+            // ถ้าเรียก Save ซ้ำบน Connection เดียว (เช่น ชุดทดสอบ SIT ที่วนเรียกทีละคลัง) -> ต้อง DROP ก่อนสร้างทุกครั้ง ไม่งั้น error "There is already an object named '#OutlierStatusStage'"
+            // ใช้ OBJECT_ID แทน DROP TABLE IF EXISTS เพื่อรองรับ SQL Server ทุกเวอร์ชัน
             using (SqlCommand create = new SqlCommand(@"
+                IF OBJECT_ID('tempdb..#OutlierStatusStage') IS NOT NULL DROP TABLE #OutlierStatusStage;
                 CREATE TABLE #OutlierStatusStage (
                     warehouse_code VARCHAR(20) COLLATE DATABASE_DEFAULT NOT NULL,
                     item_id VARCHAR(50) COLLATE DATABASE_DEFAULT NOT NULL,
@@ -242,6 +244,12 @@ namespace DRP_Project.src.ModelRouting
             {
                 update.CommandTimeout = 0;
                 updated = update.ExecuteNonQuery();
+            }
+
+            // ทิ้ง #temp ทันทีที่ใช้เสร็จ (อยู่ใน Transaction เดียวกัน: ถ้า ROLLBACK การ DROP ก็ถูกย้อนด้วย และ DROP ก่อนสร้างด้านบนกันซ้ำอยู่แล้ว)
+            using (SqlCommand drop = new SqlCommand("DROP TABLE #OutlierStatusStage;", connection, transaction))
+            {
+                drop.ExecuteNonQuery();
             }
 
             // ต้องอัปเดตครบ 24 งวดทุก SKU: ขาด/เกิน = ข้อมูลสองตารางไม่ตรงกัน -> throw (ROLLBACK ทั้งหมด)
